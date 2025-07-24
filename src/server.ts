@@ -11,6 +11,7 @@ import jwt from "jsonwebtoken";
 import { PageModel } from "./models/page.model";
 import { ProjectModel } from "./models/project.model";
 import { CanvasModel } from "./models/canvas.model";
+import { LayerModel } from "./models/layer.model";
 
 connectDB();
 connectConsumer();
@@ -112,18 +113,18 @@ io.on("connection", (socket) => {
         `[Room] User ${socket.data.user.email} joined project room: ${projectId}`
       );
 
-      // 1-1. 초기 페이지 데이터 전송 (기존 코드)
-      const pages = await PageModel.find({ projectId }).sort({ order: 1 });
-      socket.emit("initial-pages", pages);
+      const [pages, canvases, layers] = await Promise.all([
+        PageModel.find({ projectId }).sort({ order: 1 }).lean(),
+        CanvasModel.find({ projectId }).sort({ order: 1 }).lean(),
+        LayerModel.find({ projectId }).sort({ order: 1 }).lean(),
+      ]);
 
-      // ✨ 1-2. 초기 캔버스 데이터 전송 (새로 추가할 코드)
-      const canvases = await CanvasModel.find({ projectId }).sort({ order: 1 });
-      socket.emit("initial-canvases", canvases);
-    } catch (error: any) {
-      console.error("[Error] Exception in join-project handler:", error);
-      socket.emit("error", {
-        message: "Failed to join project due to an exception.",
-      });
+      socket.emit("initial-data", { pages, canvases, layers });
+      console.log(
+        `[Initial Data] Sent initial data for project ${projectId} to ${socket.data.user.email}`
+      );
+    } catch (error) {
+      socket.emit("error", { message: "Failed to join project." });
     }
   });
 
@@ -213,6 +214,48 @@ io.on("connection", (socket) => {
       }
     }
   );
+
+  socket.on("create-layer", async ({ canvasId, projectId, name, type }) => {
+    try {
+      // 권한 확인 (editor 이상)
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can create layers.",
+        });
+      }
+
+      // 부모 캔버스 존재 확인
+      const parentCanvas = await CanvasModel.findById(canvasId);
+      if (!parentCanvas) {
+        return socket.emit("error", { message: "Parent canvas not found." });
+      }
+
+      // 순서 계산
+      const lastLayer = await LayerModel.findOne({ canvasId }).sort({
+        order: -1,
+      });
+      const newOrder = lastLayer ? lastLayer.order + 1 : 0;
+
+      const newLayer = await LayerModel.create({
+        canvasId,
+        projectId,
+        name,
+        type,
+        order: newOrder,
+      });
+
+      // 프로젝트 Room에 브로드캐스트
+      io.to(projectId).emit("layer-created", newLayer);
+      console.log(`[Layer] New layer '${name}' created on canvas ${canvasId}`);
+    } catch (error) {
+      console.error(`[Error] Failed to create layer:`, error);
+      socket.emit("error", { message: "Failed to create layer." });
+    }
+  });
 
   socket.on("disconnect", () => {
     console.log(`[Socket.IO] user disconnected: ${socket.id}`);
