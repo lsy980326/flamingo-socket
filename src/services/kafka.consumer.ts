@@ -1,9 +1,14 @@
 import { Kafka, Consumer } from "kafkajs";
+import { createMechanism } from "@jm18457/kafkajs-msk-iam-authentication-mechanism";
 import { ProjectModel } from "../models/project.model";
 
 const kafka = new Kafka({
-  clientId: "flamingo-socket-server",
-  brokers: [process.env.KAFKA_BROKERS!],
+  clientId: "flamingo-socket-server", // 클라이언트 ID는 구분되게 설정
+  brokers: process.env.KAFKA_BROKERS!.split(","),
+  ssl: true,
+  sasl: createMechanism({
+    region: process.env.AWS_REGION || "ap-northeast-2",
+  }),
 });
 
 const consumer: Consumer = kafka.consumer({ groupId: "flamingo-socket-group" });
