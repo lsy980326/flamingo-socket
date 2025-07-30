@@ -1,11 +1,28 @@
 import { Kafka, Consumer } from "kafkajs";
 import { ProjectModel } from "../models/project.model";
 
-const kafka = new Kafka({
-  clientId: "flamingo-socket-server", // 클라이언트 ID
-  brokers: process.env.KAFKA_BROKERS!.split(",").map((b) => b.trim()),
-  ssl: true,
-});
+const isProduction = process.env.NODE_ENV === "production";
+console.log(
+  `[Kafka Consumer] Running in ${
+    isProduction ? "PRODUCTION" : "DEVELOPMENT"
+  } mode.`
+);
+
+let kafka: Kafka;
+
+if (isProduction) {
+  kafka = new Kafka({
+    clientId: "flamingo-socket-server", // 클라이언트 ID
+    brokers: process.env.KAFKA_BROKERS!.split(",").map((b) => b.trim()),
+    ssl: true,
+  });
+} else {
+  // --- 로컬 개발 환경 설정 ---
+  kafka = new Kafka({
+    clientId: "flamingo-socket-server-local",
+    brokers: ["localhost:29092"],
+  });
+}
 
 const consumer: Consumer = kafka.consumer({
   groupId: "flamingo-socket-group",

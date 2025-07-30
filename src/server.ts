@@ -165,6 +165,71 @@ io.on("connection", (socket) => {
     }
   });
 
+  // 페이지 수정
+  socket.on("update-page", async ({ projectId, pageId, updates }) => {
+    try {
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can update pages.",
+        });
+      }
+
+      const updatedPage = await PageModel.findByIdAndUpdate(
+        pageId,
+        { $set: updates },
+        { new: true }
+      );
+
+      if (updatedPage) {
+        io.to(projectId).emit("page-updated", updatedPage);
+        console.log(
+          `[Page] Page ${pageId} updated by ${socket.data.user.email}`
+        );
+      }
+    } catch (error) {
+      socket.emit("error", { message: "Failed to update page." });
+    }
+  });
+
+  // 페이지 삭제
+  socket.on("delete-page", async ({ projectId, pageId }) => {
+    try {
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can delete pages.",
+        });
+      }
+
+      // 연쇄 삭제: 이 페이지에 속한 모든 캔버스 ID 조회
+      const canvasesToDelete = await CanvasModel.find({ pageId }).select("_id");
+      const canvasIds = canvasesToDelete.map((c) => c._id);
+
+      // 연쇄 삭제: 해당 캔버스들에 속한 모든 레이어 삭제
+      if (canvasIds.length > 0) {
+        await LayerModel.deleteMany({ canvasId: { $in: canvasIds } });
+      }
+      // 연쇄 삭제: 해당 페이지에 속한 모든 캔버스 삭제
+      await CanvasModel.deleteMany({ pageId });
+      // 최종적으로 페이지 삭제
+      await PageModel.findByIdAndDelete(pageId);
+
+      io.to(projectId).emit("page-deleted", { pageId });
+      console.log(
+        `[Page] Page ${pageId} and its contents deleted by ${socket.data.user.email}`
+      );
+    } catch (error) {
+      socket.emit("error", { message: "Failed to delete page." });
+    }
+  });
+
   socket.on(
     "create-canvas",
     async ({ pageId, projectId, name, width, height, unit }) => {
@@ -215,6 +280,64 @@ io.on("connection", (socket) => {
     }
   );
 
+  socket.on("update-canvas", async ({ projectId, canvasId, updates }) => {
+    try {
+      // 권한 확인 (editor 이상)
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can update canvases.",
+        });
+      }
+
+      const updatedCanvas = await CanvasModel.findByIdAndUpdate(
+        canvasId,
+        { $set: updates },
+        { new: true }
+      );
+
+      if (updatedCanvas) {
+        io.to(projectId).emit("canvas-updated", updatedCanvas);
+        console.log(
+          `[Canvas] Canvas ${canvasId} updated by ${socket.data.user.email}`
+        );
+      }
+    } catch (error) {
+      socket.emit("error", { message: "Failed to update canvas." });
+    }
+  });
+
+  socket.on("delete-canvas", async ({ projectId, canvasId }) => {
+    try {
+      // 권한 확인 (editor 이상)
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can delete canvases.",
+        });
+      }
+
+      // 연쇄 삭제: 이 캔버스에 속한 모든 레이어 삭제
+      await LayerModel.deleteMany({ canvasId: canvasId });
+
+      // 캔버스 삭제
+      await CanvasModel.findByIdAndDelete(canvasId);
+
+      io.to(projectId).emit("canvas-deleted", { canvasId, projectId });
+      console.log(
+        `[Canvas] Canvas ${canvasId} and its layers deleted by ${socket.data.user.email}`
+      );
+    } catch (error) {
+      socket.emit("error", { message: "Failed to delete canvas." });
+    }
+  });
+
   socket.on("create-layer", async ({ canvasId, projectId, name, type }) => {
     try {
       // 권한 확인 (editor 이상)
@@ -254,6 +377,65 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error(`[Error] Failed to create layer:`, error);
       socket.emit("error", { message: "Failed to create layer." });
+    }
+  });
+
+  socket.on("update-layer", async ({ projectId, layerId, updates }) => {
+    try {
+      // 권한 확인 (editor 이상)
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can update layers.",
+        });
+      }
+
+      // 'data' 필드는 이 이벤트로 수정할 수 없도록 방지
+      if (updates.data) {
+        delete updates.data;
+      }
+
+      const updatedLayer = await LayerModel.findByIdAndUpdate(
+        layerId,
+        { $set: updates },
+        { new: true }
+      );
+
+      if (updatedLayer) {
+        io.to(projectId).emit("layer-updated", updatedLayer);
+        console.log(
+          `[Layer] Layer ${layerId} updated by ${socket.data.user.email}`
+        );
+      }
+    } catch (error) {
+      socket.emit("error", { message: "Failed to update layer." });
+    }
+  });
+
+  socket.on("delete-layer", async ({ projectId, layerId }) => {
+    try {
+      // 권한 확인 (editor 이상)
+      const project = await ProjectModel.findOne({ _id: projectId });
+      const userRole = project?.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      if (userRole !== "owner" && userRole !== "editor") {
+        return socket.emit("error", {
+          message: "Only owners or editors can delete layers.",
+        });
+      }
+
+      await LayerModel.findByIdAndDelete(layerId);
+
+      io.to(projectId).emit("layer-deleted", { layerId, projectId });
+      console.log(
+        `[Layer] Layer ${layerId} deleted by ${socket.data.user.email}`
+      );
+    } catch (error) {
+      socket.emit("error", { message: "Failed to delete layer." });
     }
   });
 
