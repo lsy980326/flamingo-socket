@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "start:yjs": "set HOST=localhost && set PORT=8080 && node node_modules/y-websocket/bin/server.js"
   },
   "keywords": [],
   "author": "",
@@ -18,16 +19,30 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
+    "ioredis": "^5.7.0",
     "jsonwebtoken": "^9.0.2",
     "kafkajs": "^2.2.4",
+    "lib0": "^0.2.114",
+    "lodash": "^4.17.21",
     "mongoose": "^8.16.4",
-    "socket.io": "^4.8.1"
+    "redis": "^5.7.0",
+    "socket.io": "^4.8.1",
+    "winston": "^3.17.0",
+    "ws": "8.17.0",
+    "y-leveldb": "^0.1.0",
+    "y-mongodb-provider": "^0.2.1",
+    "y-redis": "^1.0.3",
+    "y-websocket": "^3.0.0",
+    "yjs": "13.6.14"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/lodash": "^4.17.20",
     "@types/node": "^24.0.14",
+    "@types/ws": "^8.18.1",
+    "cross-env": "^10.0.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.8.3"
   }

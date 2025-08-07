@@ -1,0 +1,213 @@
+asyncapi: 2.6.0
+id: "urn:com:flamingo:socket-api"
+info:
+  title: Flamingo Socket Server API
+  version: 1.0.0
+  description: |
+    실시간 협업 드로잉 서비스 Flamingo의 WebSocket API 명세입니다.
+  contact:
+    name: Flamingo Support
+    email: support@flamingo.com
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  development:
+    url: ws://localhost:8080
+    protocol: socket.io
+    description: 로컬 개발 서버
+
+tags:
+  - name: Client Events
+    description: 클라이언트가 서버로 보내는 이벤트
+  - name: Server Events
+    description: 서버가 클라이언트로 보내는 이벤트
+
+defaultContentType: application/json
+
+channels:
+  # 채널 이름을 이벤트 이름과 동일하게 하여 명확성 증대
+  join-project:
+    publish:
+      operationId: joinProject
+      tags: [{ name: Client Events }]
+      summary: 특정 프로젝트 Room에 참여를 요청합니다.
+      message:
+        $ref: "#/components/messages/JoinProjectMessage"
+
+  # ... (다른 publish 이벤트들도 동일한 패턴)
+  create-page:
+    publish:
+      operationId: createPage
+      tags: [{ name: Client Events }]
+      message:
+        $ref: "#/components/messages/CreatePageMessage"
+  create-canvas:
+    publish:
+      operationId: createCanvas
+      tags: [{ name: Client Events }]
+      message:
+        $ref: "#/components/messages/CreateCanvasMessage"
+  create-layer:
+    publish:
+      operationId: createLayer
+      tags: [{ name: Client Events }]
+      message:
+        $ref: "#/components/messages/CreateLayerMessage"
+
+  # 서버 -> 클라이언트 이벤트들은 하나의 채널에서 여러 메시지를 받는 것으로 표현 가능
+  server-events:
+    subscribe:
+      operationId: receiveServerEvents
+      tags: [{ name: Server Events }]
+      summary: 서버로부터 다양한 이벤트를 수신합니다.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/InitialDataMessage"
+          - $ref: "#/components/messages/PageCreatedMessage"
+          - $ref: "#/components/messages/CanvasCreatedMessage"
+          - $ref: "#/components/messages/LayerCreatedMessage"
+          - $ref: "#/components/messages/ErrorMessage"
+
+components:
+  messages:
+    JoinProjectMessage:
+      messageId: joinProject
+      payload:
+        $ref: "#/components/schemas/JoinProjectPayload"
+    CreatePageMessage:
+      messageId: createPage
+      payload:
+        $ref: "#/components/schemas/CreatePagePayload"
+    # ... (다른 메시지들도 messageId와 payload를 가짐)
+    CreateCanvasMessage:
+      messageId: createCanvas
+      payload: { $ref: "#/components/schemas/CreateCanvasPayload" }
+    CreateLayerMessage:
+      messageId: createLayer
+      payload: { $ref: "#/components/schemas/CreateLayerPayload" }
+    InitialDataMessage:
+      messageId: initialData
+      payload: { $ref: "#/components/schemas/InitialDataPayload" }
+    PageCreatedMessage:
+      messageId: pageCreated
+      payload: { $ref: "#/components/schemas/Page" }
+    CanvasCreatedMessage:
+      messageId: canvasCreated
+      payload: { $ref: "#/components/schemas/Canvas" }
+    LayerCreatedMessage:
+      messageId: layerCreated
+      payload: { $ref: "#/components/schemas/Layer" }
+    ErrorMessage:
+      messageId: error
+      payload: { $ref: "#/components/schemas/ErrorPayload" }
+
+  schemas:
+    # --- Payloads ---
+    JoinProjectPayload: { type: string, format: uuid }
+    CreatePagePayload:
+      type: object
+      properties:
+        { projectId: { type: string, format: uuid }, name: { type: string } }
+    CreateCanvasPayload:
+      type: object
+      properties:
+        {
+          pageId: { type: string },
+          projectId: { type: string, format: uuid },
+          name: { type: string },
+          width: { type: number },
+          height: { type: number },
+          unit: { type: string, enum: ["px", "mm", "cm", "in", "pt"] },
+        }
+    CreateLayerPayload:
+      type: object
+      properties:
+        {
+          canvasId: { type: string },
+          projectId: { type: string, format: uuid },
+          name: { type: string },
+          type: { type: string, enum: ["brush", "text", "image", "shape"] },
+        }
+    InitialDataPayload:
+      type: object
+      properties:
+        pages: { type: array, items: { $ref: "#/components/schemas/Page" } }
+        canvases:
+          { type: array, items: { $ref: "#/components/schemas/Canvas" } }
+        layers: { type: array, items: { $ref: "#/components/schemas/Layer" } }
+    ErrorPayload:
+      type: object
+      properties: { message: { type: string } }
+    # --- Data Models ---
+    Page:
+      type: object
+      properties:
+        {
+          _id: { type: string },
+          projectId: { type: string, format: uuid },
+          name: { type: string },
+          order: { type: number },
+          createdAt: { type: string, format: "date-time" },
+          updatedAt: { type: string, format: "date-time" },
+        }
+    Canvas:
+      type: object
+      properties:
+        {
+          _id: { type: string },
+          pageId: { type: string },
+          projectId: { type: string, format: uuid },
+          name: { type: string },
+          order: { type: number },
+          width: { type: number },
+          height: { type: number },
+          unit: { type: string, enum: ["px", "mm", "cm", "in", "pt"] },
+          createdAt: { type: string, format: "date-time" },
+          updatedAt: { type: string, format: "date-time" },
+        }
+    Layer:
+      type: object
+      properties:
+        {
+          _id: { type: string },
+          canvasId: { type: string },
+          projectId: { type: string, format: uuid },
+          name: { type: string },
+          order: { type: number },
+          type: { type: string, enum: ["brush", "text", "image", "shape"] },
+          blendMode:
+            {
+              type: string,
+              enum:
+                [
+                  "normal",
+                  "multiply",
+                  "screen",
+                  "overlay",
+                  "soft-light",
+                  "hard-light",
+                  "color-dodge",
+                  "color-burn",
+                  "darken",
+                  "lighten",
+                  "difference",
+                  "exclusion",
+                ],
+            },
+          opacity: { type: number, minimum: 0, maximum: 100 },
+          isVisible: { type: boolean },
+          isLocked: { type: boolean },
+          data: { type: object },
+          createdAt: { type: string, format: "date-time" },
+          updatedAt: { type: string, format: "date-time" },
+        }
+
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Connect with `io({ auth: { token: "YOUR_JWT" } });`

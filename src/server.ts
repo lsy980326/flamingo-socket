@@ -3,132 +3,93 @@ dotenv.config();
 
 import express, { Express, Request, Response } from "express";
 import { createServer } from "http";
-import { Server as SocketIOServer } from "socket.io";
+import { Server as SocketIOServer, Socket } from "socket.io";
 import cors from "cors";
+import jwt from "jsonwebtoken";
+
+// 서비스 및 설정 모듈
 import { connectConsumer } from "./services/kafka.consumer";
 import connectDB from "./config/db";
-import jwt from "jsonwebtoken";
-import { PageModel } from "./models/page.model";
+import logger from "./config/logger";
+import redisClient from "./services/redis.client"; // Redis 클라이언트 import
+
+// 모델
 import { ProjectModel } from "./models/project.model";
+import { PageModel } from "./models/page.model";
 import { CanvasModel } from "./models/canvas.model";
 import { LayerModel } from "./models/layer.model";
 
+// --- 1. 초기화 ---
 connectDB();
 connectConsumer();
 
 const app: Express = express();
-const PORT = process.env.PORT || 8080;
-
-app.use(cors());
-app.use(express.json());
-
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// 기본 라우트
+// --- 2. Express 미들웨어 및 라우트 ---
+app.use(cors());
+app.use(express.json());
 app.get("/", (req: Request, res: Response) => {
   res.send("Flamingo Socket Server is running!");
 });
 
-// JWT 인증 미들웨어
-io.use((socket, next) => {
-  const token = socket.handshake.auth.token;
-
-  if (!token) {
-    // 토큰이 없으면 연결 거부
+// --- 3. 공통 JWT 인증 미들웨어 (메인 네임스페이스용) ---
+const mainJwtAuthMiddleware = (socket: Socket, next: (err?: Error) => void) => {
+  const token =
+    socket.handshake.auth.token || (socket.handshake.query.token as string);
+  if (!token)
     return next(new Error("Authentication error: No token provided."));
-  }
 
   jwt.verify(token, process.env.JWT_SECRET!, (err: any, decoded: any) => {
     if (err) {
-      // 토큰이 유효하지 않으면 연결 거부
-      console.error("[Auth] Invalid token:", err.message);
+      logger.error("[Auth] Invalid token:", err.message);
       return next(new Error("Authentication error: Invalid token."));
     }
-
     socket.data.user = { id: decoded.id, email: decoded.email };
     next();
   });
-});
+};
 
-// Socket.IO 연결 이벤트
-io.on("connection", (socket) => {
-  console.log(
-    `[Socket.IO] Authenticated user connected: ${socket.data.user.email} (userID: ${socket.data.user.id}) (socketID: ${socket.id})`
+// --- 4. 메인 네임스페이스 (`/`): 메타데이터 관리 ---
+const mainNamespace = io.of("/");
+mainNamespace.use(mainJwtAuthMiddleware);
+mainNamespace.on("connection", (socket) => {
+  logger.info(
+    `[Main] User connected: ${socket.data.user.email} (ID: ${socket.id})`
   );
 
-  //프로젝트 입장
+  // --- 프로젝트 입장 및 초기 데이터 전송 ---
   socket.on("join-project", async (projectId: string) => {
     try {
-      console.log(`--- [JOIN-PROJECT] START ---`);
-      console.log(`[JOIN-PROJECT] Received projectId: ${projectId}`);
-      console.log(
-        `[JOIN-PROJECT] Socket User ID: ${
-          socket.data.user.id
-        } (Type: ${typeof socket.data.user.id})`
-      );
-
       const project = await ProjectModel.findOne({ _id: projectId });
-
-      if (!project) {
-        console.error(
-          `[JOIN-PROJECT] CRITICAL: Project not found in MongoDB for _id: ${projectId}`
-        );
-        socket.emit("error", { message: "Project not found." });
-        return;
-      }
-
-      console.log(
-        `[JOIN-PROJECT] Found project in DB. Collaborators:`,
-        JSON.stringify(project.collaborators, null, 2)
-      );
-
-      const userFromCollaborators = project.collaborators.find(
+      const canJoin = project?.collaborators.some(
         (c) => c.userId === Number(socket.data.user.id)
       );
-
-      console.log(`[JOIN-PROJECT] Result of find():`, userFromCollaborators);
-
-      const canJoin = !!userFromCollaborators; // find 결과가 있으면 true, 없으면(undefined) false
-
-      console.log(
-        `[JOIN-PROJECT] Permission check result (canJoin): ${canJoin}`
-      );
-      console.log(`--- [JOIN-PROJECT] END ---`);
-
-      if (!canJoin) {
-        socket.emit("error", {
-          message: "You do not have permission to join this project.",
+      if (!canJoin)
+        return socket.emit("error", {
+          message: "Permission denied to join project.",
         });
-        return;
-      }
 
       socket.join(projectId);
-      console.log(
-        `[Room] User ${socket.data.user.email} joined project room: ${projectId}`
+      logger.info(
+        `[Main] User ${socket.data.user.email} joined project room: ${projectId}`
       );
 
       const [pages, canvases, layers] = await Promise.all([
         PageModel.find({ projectId }).sort({ order: 1 }).lean(),
         CanvasModel.find({ projectId }).sort({ order: 1 }).lean(),
-        LayerModel.find({ projectId }).sort({ order: 1 }).lean(),
+        LayerModel.find({ projectId }).sort({ order: 1 }).lean(), // 메타데이터만 전송
       ]);
-
       socket.emit("initial-data", { pages, canvases, layers });
-      console.log(
-        `[Initial Data] Sent initial data for project ${projectId} to ${socket.data.user.email}`
-      );
     } catch (error) {
       socket.emit("error", { message: "Failed to join project." });
     }
   });
 
-  // 페이지 생성
+  // --- 페이지/캔버스/레이어 메타데이터 CRUD 핸들러들 ---
   socket.on("create-page", async ({ projectId, name }) => {
     try {
       // 권한 재확인 (editor 이상)
@@ -157,7 +118,7 @@ io.on("connection", (socket) => {
 
       // Room에 있는 모든 클라이언트에게 브로드캐스트
       io.to(projectId).emit("page-created", newPage);
-      console.log(
+      logger.info(
         `[Page] New page created in project ${projectId} by ${socket.data.user.email}`
       );
     } catch (error) {
@@ -186,7 +147,7 @@ io.on("connection", (socket) => {
 
       if (updatedPage) {
         io.to(projectId).emit("page-updated", updatedPage);
-        console.log(
+        logger.info(
           `[Page] Page ${pageId} updated by ${socket.data.user.email}`
         );
       }
@@ -222,7 +183,7 @@ io.on("connection", (socket) => {
       await PageModel.findByIdAndDelete(pageId);
 
       io.to(projectId).emit("page-deleted", { pageId });
-      console.log(
+      logger.info(
         `[Page] Page ${pageId} and its contents deleted by ${socket.data.user.email}`
       );
     } catch (error) {
@@ -270,11 +231,11 @@ io.on("connection", (socket) => {
 
         // 프로젝트 Room에 있는 모든 클라이언트에게 브로드캐스트
         io.to(projectId).emit("canvas-created", newCanvas);
-        console.log(
+        logger.info(
           `[Canvas] New canvas '${name}' created on page ${pageId} by ${socket.data.user.email}`
         );
       } catch (error) {
-        console.error(`[Error] Failed to create canvas:`, error);
+        logger.error(`[Error] Failed to create canvas:`, error);
         socket.emit("error", { message: "Failed to create canvas." });
       }
     }
@@ -301,7 +262,7 @@ io.on("connection", (socket) => {
 
       if (updatedCanvas) {
         io.to(projectId).emit("canvas-updated", updatedCanvas);
-        console.log(
+        logger.info(
           `[Canvas] Canvas ${canvasId} updated by ${socket.data.user.email}`
         );
       }
@@ -330,7 +291,7 @@ io.on("connection", (socket) => {
       await CanvasModel.findByIdAndDelete(canvasId);
 
       io.to(projectId).emit("canvas-deleted", { canvasId, projectId });
-      console.log(
+      logger.info(
         `[Canvas] Canvas ${canvasId} and its layers deleted by ${socket.data.user.email}`
       );
     } catch (error) {
@@ -373,9 +334,9 @@ io.on("connection", (socket) => {
 
       // 프로젝트 Room에 브로드캐스트
       io.to(projectId).emit("layer-created", newLayer);
-      console.log(`[Layer] New layer '${name}' created on canvas ${canvasId}`);
+      logger.info(`[Layer] New layer '${name}' created on canvas ${canvasId}`);
     } catch (error) {
-      console.error(`[Error] Failed to create layer:`, error);
+      logger.error(`[Error] Failed to create layer:`, error);
       socket.emit("error", { message: "Failed to create layer." });
     }
   });
@@ -406,7 +367,7 @@ io.on("connection", (socket) => {
 
       if (updatedLayer) {
         io.to(projectId).emit("layer-updated", updatedLayer);
-        console.log(
+        logger.info(
           `[Layer] Layer ${layerId} updated by ${socket.data.user.email}`
         );
       }
@@ -431,7 +392,7 @@ io.on("connection", (socket) => {
       await LayerModel.findByIdAndDelete(layerId);
 
       io.to(projectId).emit("layer-deleted", { layerId, projectId });
-      console.log(
+      logger.info(
         `[Layer] Layer ${layerId} deleted by ${socket.data.user.email}`
       );
     } catch (error) {
@@ -439,11 +400,183 @@ io.on("connection", (socket) => {
     }
   });
 
+  // --- ▼▼▼▼▼ Y-WebRTC 시그널링 서버 로직 추가 ▼▼▼▼▼ ---
+  socket.on("webrtc-join-room", (roomName: string) => {
+    socket.join(roomName);
+    // 자신을 제외한 Room의 다른 피어들에게 연결 요청을 보내도록 알림
+    socket.to(roomName).emit("webrtc-new-peer", { peerId: socket.id });
+    console.log(
+      `[WebRTC] User ${socket.data.user.email} joined signaling room: ${roomName}`
+    );
+  });
+
+  socket.on("webrtc-signal", (payload) => {
+    const { to, from, signal } = payload;
+    console.log(`[WebRTC] Relaying signal from ${from} to ${to}`);
+    // 'to' 소켓 ID를 가진 특정 클라이언트에게만 메시지 전송
+    io.to(to).emit("webrtc-signal", { from, signal });
+  });
+
+  socket.on("disconnecting", () => {
+    // socket.rooms는 Set이므로, 첫 번째 요소(socket.id)를 제외하고 순회
+    socket.rooms.forEach((room) => {
+      if (room !== socket.id) {
+        socket.to(room).emit("webrtc-peer-left", { peerId: socket.id });
+        console.log(
+          `[WebRTC] User ${socket.data.user.email} left signaling room: ${room}`
+        );
+      }
+    });
+  });
+
   socket.on("disconnect", () => {
-    console.log(`[Socket.IO] user disconnected: ${socket.id}`);
+    logger.info(`[Socket.IO] user disconnected: ${socket.id}`);
   });
 });
 
+// --- 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성 ---
+const layerNamespace = io.of(/^\/layer-.+$/);
+// 레이어 네임스페이스용 인증/인가 미들웨어
+layerNamespace.use(async (socket, next) => {
+  try {
+    const token =
+      socket.handshake.auth.token || (socket.handshake.query.token as string);
+    if (!token)
+      return next(new Error("Authentication error: No token provided."));
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+      id: number;
+      email: string;
+    };
+    socket.data.user = { id: decoded.id, email: decoded.email };
+
+    const layerId = socket.nsp.name.replace("/layer-", "");
+    const layer = await LayerModel.findById(layerId).select("projectId").lean();
+    if (!layer) return next(new Error("Permission denied: Layer not found."));
+
+    const project = await ProjectModel.findOne({ _id: layer.projectId })
+      .select("collaborators")
+      .lean();
+    if (!project)
+      return next(new Error("Permission denied: Project not found."));
+
+    const userRole = project.collaborators.find(
+      (c) => c.userId === Number(socket.data.user.id)
+    )?.role;
+    if (userRole !== "owner" && userRole !== "editor") {
+      return next(new Error("Permission denied: Not an editor."));
+    }
+
+    next();
+  } catch (error) {
+    logger.error("[AuthZ] Error during layer permission check:", error);
+    return next(new Error("Permission check failed."));
+  }
+});
+
+layerNamespace.on("connection", (socket) => {
+  const layerId = socket.nsp.name.substring("/layer-".length);
+  const user = socket.data.user;
+  logger.info(`[Layer Namespace] User connected to layer: ${layerId}`);
+  logger.info(`User connected: ${user.email}`);
+
+  // --- ▼▼▼▼▼ Y-WebRTC v13+ 표준 시그널링 서버 로직 ▼▼▼▼▼ ---
+
+  /**
+   * 클라이언트가 시그널링 Room에 참여를 요청.
+   * Room에 이미 있는 다른 피어들의 목록을 요청한 클라이언트에게 보내줌.
+   */
+  socket.on("y-webrtc-join", async (roomName: string) => {
+    if (roomName !== layerId) {
+      // 클라이언트가 접속한 네임스페이스와 다른 Room에 참여하려고 하면 거부 (보안 강화)
+      return;
+    }
+    socket.join(roomName);
+
+    // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
+    const otherSockets = await layerNamespace.in(roomName).fetchSockets();
+    const otherPeerIds = otherSockets
+      .map((s) => s.id)
+      .filter((id) => id !== socket.id); // 자기 자신은 제외
+
+    // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
+    socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
+
+    logger.info(
+      `[WebRTC] User ${user.email} joined y-webrtc room: ${roomName}`
+    );
+  });
+
+  /**
+   * WebRTC 시그널링 메시지를 특정 피어에게 전달(relay).
+   */
+  socket.on("y-webrtc-signal", (payload) => {
+    const { to, from, signal } = payload;
+    // 'to' 소켓 ID를 가진 특정 클라이언트에게만 메시지 전송
+    layerNamespace.to(to).emit("y-webrtc-signal", { from, signal });
+    // 로그가 너무 많이 찍히므로, 필요 시 주석 처리
+    // logger.info(`[WebRTC] Relaying signal from ${from} to ${to}`);
+  });
+
+  /**
+   * 클라이언트 연결이 끊겼을 때, Room에 있던 다른 피어들에게 알림.
+   */
+  socket.on("disconnecting", () => {
+    socket.rooms.forEach((room) => {
+      if (room !== socket.id) {
+        // `y-webrtc-left` 이벤트로 변경
+        socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
+        logger.info(`[WebRTC] User ${user.email} left y-webrtc room: ${room}`);
+      }
+    });
+  });
+
+  // --- ▲▲▲▲▲ Y-WebRTC v13+ 표준 시그널링 서버 로직 끝 ▲▲▲▲▲ ---
+
+  // --- Yjs 데이터 로드/저장 로직 ---
+  // 클라이언트가 최신 데이터를 요청
+  socket.on("request-layer-data", async (callback) => {
+    const key = `yjs-doc:${layerId}`;
+    try {
+      const data = await redisClient.getBuffer(key); // Buffer 형태로 가져옴
+      if (data) {
+        logger.info(`[Yjs] Loaded data for layer ${layerId} from Redis.`);
+        callback(data);
+      } else {
+        // TODO: Redis에 없으면 MongoDB에서 로드하는 로직 추가
+        logger.warn(`[Yjs] No data found in Redis for layer ${layerId}.`);
+        callback(null);
+      }
+    } catch (error) {
+      logger.error(`[Yjs] Failed to load data for layer ${layerId}:`, error);
+      callback(null);
+    }
+  });
+
+  // 클라이언트로부터 데이터 저장 요청 수신
+  socket.on("save-layer-data", async (docUpdate: Buffer) => {
+    console.log(`[Yjs] Received save-layer-data event.`);
+    console.log(`[Yjs] Data type: ${typeof docUpdate}`);
+    console.log(`[Yjs] Is Buffer? ${Buffer.isBuffer(docUpdate)}`);
+    console.log(`[Yjs] Received data content:`, docUpdate);
+
+    const key = `yjs-doc:${layerId}`;
+    try {
+      await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
+      logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
+
+      // TODO: MongoDB에 영구 저장하는 로직 (Debounce/Throttle)
+    } catch (error) {
+      logger.error(`[Yjs] Failed to save data for layer ${layerId}:`, error);
+      socket.emit("error", {
+        message: `Failed to save layer data for ${layerId}`,
+      });
+    }
+  });
+});
+
+// --- 6. 서버 실행 ---
+const PORT = process.env.PORT || 8080;
 httpServer.listen(PORT, () => {
-  console.log(`[Server] Server is running at http://localhost:${PORT}`);
+  logger.info(`[Server] Server is running at http://localhost:${PORT}`);
 });
