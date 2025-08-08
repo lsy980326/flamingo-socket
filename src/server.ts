@@ -12,6 +12,10 @@ import { connectConsumer } from "./services/kafka.consumer";
 import connectDB from "./config/db";
 import logger from "./config/logger";
 import redisClient from "./services/redis.client"; // Redis 클라이언트 import
+import {
+  debouncedSaveToMongo,
+  flushAllPendingSaves,
+} from "./services/persistence.service"; // 영속성 서비스 import
 
 // 모델
 import { ProjectModel } from "./models/project.model";
@@ -19,7 +23,9 @@ import { PageModel } from "./models/page.model";
 import { CanvasModel } from "./models/canvas.model";
 import { LayerModel } from "./models/layer.model";
 
-// --- 1. 초기화 ---
+//========================================
+// 1. 초기화 (Initialization)
+//========================================
 connectDB();
 connectConsumer();
 
@@ -27,16 +33,21 @@ const app: Express = express();
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["websocket"],
 });
 
-// --- 2. Express 미들웨어 및 라우트 ---
+//========================================
+// 2. Express 미들웨어 및 라우트
+//========================================
 app.use(cors());
 app.use(express.json());
 app.get("/", (req: Request, res: Response) => {
   res.send("Flamingo Socket Server is running!");
 });
 
-// --- 3. 공통 JWT 인증 미들웨어 (메인 네임스페이스용) ---
+//========================================
+// 3. 공통 JWT 인증 미들웨어 (메인 네임스페이스용)
+//========================================
 const mainJwtAuthMiddleware = (socket: Socket, next: (err?: Error) => void) => {
   const token =
     socket.handshake.auth.token || (socket.handshake.query.token as string);
@@ -53,7 +64,9 @@ const mainJwtAuthMiddleware = (socket: Socket, next: (err?: Error) => void) => {
   });
 };
 
-// --- 4. 메인 네임스페이스 (`/`): 메타데이터 관리 ---
+//========================================
+// 4. 메인 네임스페이스 (`/`): 메타데이터 관리
+//========================================
 const mainNamespace = io.of("/");
 mainNamespace.use(mainJwtAuthMiddleware);
 mainNamespace.on("connection", (socket) => {
@@ -400,41 +413,14 @@ mainNamespace.on("connection", (socket) => {
     }
   });
 
-  // --- ▼▼▼▼▼ Y-WebRTC 시그널링 서버 로직 추가 ▼▼▼▼▼ ---
-  socket.on("webrtc-join-room", (roomName: string) => {
-    socket.join(roomName);
-    // 자신을 제외한 Room의 다른 피어들에게 연결 요청을 보내도록 알림
-    socket.to(roomName).emit("webrtc-new-peer", { peerId: socket.id });
-    console.log(
-      `[WebRTC] User ${socket.data.user.email} joined signaling room: ${roomName}`
-    );
-  });
-
-  socket.on("webrtc-signal", (payload) => {
-    const { to, from, signal } = payload;
-    console.log(`[WebRTC] Relaying signal from ${from} to ${to}`);
-    // 'to' 소켓 ID를 가진 특정 클라이언트에게만 메시지 전송
-    io.to(to).emit("webrtc-signal", { from, signal });
-  });
-
-  socket.on("disconnecting", () => {
-    // socket.rooms는 Set이므로, 첫 번째 요소(socket.id)를 제외하고 순회
-    socket.rooms.forEach((room) => {
-      if (room !== socket.id) {
-        socket.to(room).emit("webrtc-peer-left", { peerId: socket.id });
-        console.log(
-          `[WebRTC] User ${socket.data.user.email} left signaling room: ${room}`
-        );
-      }
-    });
-  });
-
   socket.on("disconnect", () => {
     logger.info(`[Socket.IO] user disconnected: ${socket.id}`);
   });
 });
 
-// --- 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성 ---
+//========================================
+// 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성
+//========================================
 const layerNamespace = io.of(/^\/layer-.+$/);
 // 레이어 네임스페이스용 인증/인가 미들웨어
 layerNamespace.use(async (socket, next) => {
@@ -473,78 +459,49 @@ layerNamespace.use(async (socket, next) => {
     return next(new Error("Permission check failed."));
   }
 });
-
 layerNamespace.on("connection", (socket) => {
   const layerId = socket.nsp.name.substring("/layer-".length);
   const user = socket.data.user;
   logger.info(`[Layer Namespace] User connected to layer: ${layerId}`);
   logger.info(`User connected: ${user.email}`);
 
-  // --- ▼▼▼▼▼ Y-WebRTC v13+ 표준 시그널링 서버 로직 ▼▼▼▼▼ ---
-
   /**
-   * 클라이언트가 시그널링 Room에 참여를 요청.
-   * Room에 이미 있는 다른 피어들의 목록을 요청한 클라이언트에게 보내줌.
+   * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
-  socket.on("y-webrtc-join", async (roomName: string) => {
-    if (roomName !== layerId) {
-      // 클라이언트가 접속한 네임스페이스와 다른 Room에 참여하려고 하면 거부 (보안 강화)
-      return;
-    }
-    socket.join(roomName);
-
-    // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
-    const otherSockets = await layerNamespace.in(roomName).fetchSockets();
-    const otherPeerIds = otherSockets
-      .map((s) => s.id)
-      .filter((id) => id !== socket.id); // 자기 자신은 제외
-
-    // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
-    socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
-
-    logger.info(
-      `[WebRTC] User ${user.email} joined y-webrtc room: ${roomName}`
-    );
-  });
-
-  /**
-   * WebRTC 시그널링 메시지를 특정 피어에게 전달(relay).
-   */
-  socket.on("y-webrtc-signal", (payload) => {
-    const { to, from, signal } = payload;
-    // 'to' 소켓 ID를 가진 특정 클라이언트에게만 메시지 전송
-    layerNamespace.to(to).emit("y-webrtc-signal", { from, signal });
-    // 로그가 너무 많이 찍히므로, 필요 시 주석 처리
-    // logger.info(`[WebRTC] Relaying signal from ${from} to ${to}`);
-  });
-
-  /**
-   * 클라이언트 연결이 끊겼을 때, Room에 있던 다른 피어들에게 알림.
-   */
-  socket.on("disconnecting", () => {
-    socket.rooms.forEach((room) => {
-      if (room !== socket.id) {
-        // `y-webrtc-left` 이벤트로 변경
-        socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
-        logger.info(`[WebRTC] User ${user.email} left y-webrtc room: ${room}`);
-      }
-    });
-  });
-
-  // --- ▲▲▲▲▲ Y-WebRTC v13+ 표준 시그널링 서버 로직 끝 ▲▲▲▲▲ ---
-
-  // --- Yjs 데이터 로드/저장 로직 ---
-  // 클라이언트가 최신 데이터를 요청
   socket.on("request-layer-data", async (callback) => {
-    const key = `yjs-doc:${layerId}`;
+    if (typeof callback !== "function") return;
+
+    const redisKey = `yjs-doc:${layerId}`;
+
     try {
-      const data = await redisClient.getBuffer(key); // Buffer 형태로 가져옴
-      if (data) {
-        logger.info(`[Yjs] Loaded data for layer ${layerId} from Redis.`);
-        callback(data);
+      const dataFromRedis = await redisClient.getBuffer(redisKey);
+
+      if (dataFromRedis) {
+        // Redis 데이터는 이미 순수한 Buffer이므로 그대로 전송
+        callback(dataFromRedis);
+        return;
+      }
+
+      logger.warn(
+        `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
+      );
+      const layerFromMongo = await LayerModel.findById(layerId)
+        .select("data")
+        .lean();
+
+      if (layerFromMongo && layerFromMongo.data) {
+        const mongoBinaryData = layerFromMongo.data as Binary;
+
+        // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
+        const dataBuffer = mongoBinaryData.buffer;
+
+        // 클라이언트에게는 순수한 Buffer만 전달
+        callback(dataBuffer);
+
+        // Redis에도 순수한 Buffer를 저장
+        await redisClient.set(redisKey, dataBuffer, "EX", 86400);
+        logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
       } else {
-        // TODO: Redis에 없으면 MongoDB에서 로드하는 로직 추가
-        logger.warn(`[Yjs] No data found in Redis for layer ${layerId}.`);
         callback(null);
       }
     } catch (error) {
@@ -564,8 +521,7 @@ layerNamespace.on("connection", (socket) => {
     try {
       await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
       logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
-
-      // TODO: MongoDB에 영구 저장하는 로직 (Debounce/Throttle)
+      debouncedSaveToMongo(layerId);
     } catch (error) {
       logger.error(`[Yjs] Failed to save data for layer ${layerId}:`, error);
       socket.emit("error", {
@@ -575,7 +531,84 @@ layerNamespace.on("connection", (socket) => {
   });
 });
 
-// --- 6. 서버 실행 ---
+//========================================
+// 6. Y-WebRTC 시그널링 전용 네임스페이스
+//========================================
+const webrtcNamespace = io.of("/webrtc");
+// 시그널링 서버는 단순히 메시지를 전달만 하므로, JWT 인증만으로 충분합니다.
+webrtcNamespace.use((socket, next) => {});
+webrtcNamespace.on("connection", (socket) => {
+  const user = socket.data.user;
+  logger.info(`[WebRTC-Signaling] User connected: ${user.email}`);
+
+  // y-webrtc 표준 이벤트 핸들러들
+  socket.on("y-webrtc-join", (roomName) => {
+    socket.join(roomName);
+
+    // 이 소켓을 제외한 다른 모든 소켓들에게 새로운 피어가 들어왔음을 알림
+    socket
+      .to(roomName)
+      .emit("y-webrtc-awareness-update", { peerId: socket.id });
+    logger.info(
+      `[WebRTC-Signaling] User ${user.email} joined room: ${roomName}`
+    );
+  });
+
+  socket.on("y-webrtc-signal", ({ to, signal }) => {
+    webrtcNamespace.to(to).emit("y-webrtc-signal", { from: socket.id, signal });
+  });
+
+  socket.on("y-webrtc-awareness-update", (payload) => {
+    // 받은 awareness 정보를 room의 다른 모든 피어에게 브로드캐스트
+    socket.rooms.forEach((room) => {
+      if (room !== socket.id) {
+        socket
+          .to(room)
+          .emit("y-webrtc-awareness-update", { ...payload, peerId: socket.id });
+      }
+    });
+  });
+
+  socket.on("disconnecting", () => {
+    socket.rooms.forEach((room) => {
+      if (room !== socket.id) {
+        socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
+      }
+    });
+  });
+});
+
+//========================================
+// 7. 5. Graceful Shutdown Logic
+//========================================
+const gracefulShutdown = () => {
+  logger.info("Received kill signal, initiating graceful shutdown...");
+
+  // 현재 Debounce 대기열에 있는 모든 DB 저장 작업을 즉시 실행
+  flushAllPendingSaves();
+
+  // 서버가 새로운 연결을 더 이상 받지않음음
+  httpServer.close(() => {
+    logger.info("All connections closed. Server is shutting down.");
+    // 모든 작업이 완료되면 프로세스를 종료.
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    logger.error(
+      "Could not close connections in time, forcefully shutting down."
+    );
+    process.exit(1);
+  }, 5000); // 5초
+};
+
+// 종료 신호 리스너 등록
+process.on("SIGTERM", gracefulShutdown); // 예: `kill` 명령어, AWS ECS, Kubernetes
+process.on("SIGINT", gracefulShutdown); // 예: `Ctrl+C` in terminal
+
+//========================================
+// 8. 서버 실행
+//========================================
 const PORT = process.env.PORT || 8080;
 httpServer.listen(PORT, () => {
   logger.info(`[Server] Server is running at http://localhost:${PORT}`);

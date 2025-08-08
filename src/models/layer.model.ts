@@ -69,7 +69,8 @@ const LayerSchema = new Schema<ILayer>(
     opacity: { type: Number, min: 0, max: 100, default: 100 },
     isVisible: { type: Boolean, default: true },
     isLocked: { type: Boolean, default: false },
-    data: { type: Schema.Types.Mixed, default: {} }, // 어떤 객체든 저장 가능
+    // data: { type: Schema.Types.Mixed, default: {} }, // 어떤 객체든 저장 가능
+    data: { type: Buffer, default: null },
   },
   {
     timestamps: true,
