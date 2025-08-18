@@ -424,39 +424,75 @@ mainNamespace.on("connection", (socket) => {
 const layerNamespace = io.of(/^\/layer-.+$/);
 // 레이어 네임스페이스용 인증/인가 미들웨어
 layerNamespace.use(async (socket, next) => {
+  const nspName = socket.nsp.name;
+  logger.info(`[AuthZ] Attempting to connect to namespace: ${nspName}`);
+
   try {
+    // 1. 토큰 확인
     const token =
       socket.handshake.auth.token || (socket.handshake.query.token as string);
-    if (!token)
+    if (!token) {
+      logger.warn(`[AuthZ] Failed for ${nspName}: No token provided.`);
       return next(new Error("Authentication error: No token provided."));
+    }
 
+    // 2. 토큰 검증 및 유저 정보 설정
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
       id: number;
       email: string;
     };
     socket.data.user = { id: decoded.id, email: decoded.email };
+    logger.info(
+      `[AuthZ] User ${decoded.email} authenticated for namespace ${nspName}.`
+    );
 
-    const layerId = socket.nsp.name.replace("/layer-", "");
+    // 3. 레이어 ID 추출 및 조회
+    const layerId = nspName.replace("/layer-", "");
+    logger.info(`[AuthZ] Extracted layerId: ${layerId}`);
+
     const layer = await LayerModel.findById(layerId).select("projectId").lean();
-    if (!layer) return next(new Error("Permission denied: Layer not found."));
+    if (!layer) {
+      logger.warn(`[AuthZ] Layer not found for ID: ${layerId}`);
+      return next(new Error("Permission denied: Layer not found."));
+    }
+    logger.info(
+      `[AuthZ] Found layer ${layerId}, projectId: ${layer.projectId}`
+    );
 
+    // 4. 프로젝트 조회
     const project = await ProjectModel.findOne({ _id: layer.projectId })
       .select("collaborators")
       .lean();
-    if (!project)
+    if (!project) {
+      logger.warn(
+        `[AuthZ] Project not found for ID: ${layer.projectId} (from layer ${layerId})`
+      );
       return next(new Error("Permission denied: Project not found."));
+    }
+    logger.info(`[AuthZ] Found project for layer ${layerId}.`);
 
+    // 5. 권한 확인
     const userRole = project.collaborators.find(
       (c) => c.userId === Number(socket.data.user.id)
     )?.role;
+
     if (userRole !== "owner" && userRole !== "editor") {
-      return next(new Error("Permission denied: Not an editor."));
+      logger.warn(
+        `[AuthZ] Permission denied for user ${socket.data.user.email} (role: ${userRole}) on project ${project._id}`
+      );
+      return next(new Error("Permission denied: Not an owner or editor."));
     }
 
+    logger.info(
+      `[AuthZ] User ${socket.data.user.email} authorized with role: ${userRole}. Granting access to ${nspName}.`
+    );
     next();
   } catch (error) {
-    logger.error("[AuthZ] Error during layer permission check:", error);
-    return next(new Error("Permission check failed."));
+    logger.error(
+      `[AuthZ] Critical error during layer permission check for ${nspName}:`,
+      error
+    );
+    return next(new Error("Internal server error during authorization."));
   }
 });
 layerNamespace.on("connection", (socket) => {
