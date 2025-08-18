@@ -516,6 +516,11 @@ layerNamespace.on("connection", async (socket) => {
     `[Layer Namespace] User ${user.email} connected to layer: ${layerId}`
   );
 
+  socket.join(layerId);
+  logger.info(
+    `[-------------Layer Namespace-------------] User ${user.email} joined room: ${layerId}`
+  );
+
   /**
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
@@ -593,6 +598,19 @@ layerNamespace.on("connection", async (socket) => {
         message: `Failed to save layer data for ${layerId}`,
       });
     }
+  });
+
+  // ✅ 2. 클라이언트로부터 받은 문서 업데이트를 다른 클라이언트들에게 방송(broadcast)하는 핸들러를 추가합니다.
+  socket.on("layer-update", (update: Buffer) => {
+    // 보낸 사람을 제외하고 같은 room(layerId)에 있는 모든 사람에게 업데이트를 전송합니다.
+    socket.broadcast.to(layerId).emit("layer-update", update);
+  });
+
+  // ✅ 3. 연결이 끊어지면 room에서 나갔다고 로그를 남깁니다.
+  socket.on("disconnect", () => {
+    logger.info(
+      `[-------------Layer Namespace-------------] User ${user.email} disconnected from layer/room: ${layerId}`
+    );
   });
 });
 
