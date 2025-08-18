@@ -16,6 +16,7 @@ import {
   debouncedSaveToMongo,
   flushAllPendingSaves,
 } from "./services/persistence.service"; // 영속성 서비스 import
+import { Binary } from "mongodb";
 
 // 모델
 import { ProjectModel } from "./models/project.model";
@@ -601,10 +602,13 @@ layerNamespace.on("connection", (socket) => {
         .lean();
 
       if (layerFromMongo && layerFromMongo.data) {
-        const mongoBinaryData = layerFromMongo.data as Binary;
+        // const mongoBinaryData = layerFromMongo.data as Binary;
 
-        // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
-        const dataBuffer = mongoBinaryData.buffer;
+        // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
+        // const dataBuffer = mongoBinaryData.buffer;
+        const dataBuffer = Buffer.from(
+          layerFromMongo.data as unknown as Buffer
+        );
 
         // 클라이언트에게는 순수한 Buffer만 전달
         callback(dataBuffer);

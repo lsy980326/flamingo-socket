@@ -1,4 +1,4 @@
-import { debounce } from "lodash";
+import { debounce, DebouncedFunc } from "lodash";
 import { LayerModel } from "../models/layer.model";
 import redisClient from "./redis.client";
 import logger from "../config/logger";
@@ -27,7 +27,7 @@ const saveToMongo = async (layerId: string) => {
 
 // Debounce된 함수들을 저장할 Map
 // key: layerId, value: debounce된 saveToMongo 함수
-const debouncedSavers = new Map<string, () => void>();
+const debouncedSavers = new Map<string, DebouncedFunc<() => Promise<void>>>();
 
 export const debouncedSaveToMongo = (layerId: string) => {
   if (!debouncedSavers.has(layerId)) {
