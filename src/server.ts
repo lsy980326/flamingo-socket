@@ -418,6 +418,18 @@ mainNamespace.on("connection", (socket) => {
   });
 });
 
+// ▼▼▼▼▼ 디버깅용 테스트 네임스페이스 추가 ▼▼▼▼▼
+const testLayerNamespace = io.of("/layer-test");
+testLayerNamespace.use((socket, next) => {
+  logger.info("✅✅✅ [DEBUG] Connection attempt to /layer-test middleware!");
+  // 여기서는 간단히 통과시킵니다.
+  next();
+});
+testLayerNamespace.on("connection", (socket) => {
+  logger.info("✅✅✅ [DEBUG] Successfully connected to /layer-test!");
+});
+// ▲▲▲▲▲ 여기까지 추가 ▲▲▲▲▲
+
 //========================================
 // 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성
 //========================================
