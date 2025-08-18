@@ -521,6 +521,15 @@ layerNamespace.on("connection", async (socket) => {
     `[-------------Layer Namespace-------------] User ${user.email} joined room: ${layerId}`
   );
 
+  // --- ▼▼▼ Ping-Pong 테스트 코드 추가 ▼▼▼ ---
+  socket.on("ping-test", () => {
+    logger.info(
+      `[Ping-Pong] Received PING from ${user.email} on layer ${layerId}. Sending PONG.`
+    );
+    socket.emit("pong-test");
+  });
+  // --- ▲▲▲ Ping-Pong 테스트 코드 추가 ▲▲▲ ---
+
   /**
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
