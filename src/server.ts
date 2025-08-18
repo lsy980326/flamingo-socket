@@ -34,7 +34,7 @@ const app: Express = express();
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  // transports: ["websocket"],
+  transports: ["websocket"],
 });
 
 //========================================
