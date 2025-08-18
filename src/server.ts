@@ -34,7 +34,10 @@ const app: Express = express();
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  transports: ["websocket"],
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+  pingTimeout: 60000, // 60초 동안 PONG을 받지 못하면 연결 해제 (기본값 5초)
+  pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
 });
 
 //========================================
