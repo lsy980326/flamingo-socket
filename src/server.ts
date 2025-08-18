@@ -32,7 +32,14 @@ connectConsumer();
 const app: Express = express();
 const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "https://ui-v2.greatwave.co.kr",
+    ],
+    methods: ["GET", "POST"],
+  },
   transports: ["websocket"],
 });
 
