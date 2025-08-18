@@ -581,7 +581,16 @@ layerNamespace.on("connection", (socket) => {
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
   socket.on("request-layer-data", async (callback) => {
-    if (typeof callback !== "function") return;
+    logger.info(
+      `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
+    );
+
+    if (typeof callback !== "function") {
+      logger.error(
+        `[Yjs-Load] Callback is not a function for layer ${layerId}`
+      );
+      return;
+    }
 
     const redisKey = `yjs-doc:${layerId}`;
 
@@ -589,7 +598,9 @@ layerNamespace.on("connection", (socket) => {
       const dataFromRedis = await redisClient.getBuffer(redisKey);
 
       if (dataFromRedis) {
-        // Redis 데이터는 이미 순수한 Buffer이므로 그대로 전송
+        logger.info(
+          `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
+        );
         callback(dataFromRedis);
         return;
       }
