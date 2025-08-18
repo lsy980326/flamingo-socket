@@ -492,29 +492,34 @@ layerNamespace.use(async (socket, next) => {
       `[AuthZ] User ${socket.data.user.email} authorized with role: ${userRole}. Granting access to ${nspName}.`
     );
     next();
-  } catch (error) {
+  } catch (error: any) {
+    // 에러 타입을 any로 지정하여 message에 접근
     logger.error(
-      `[AuthZ] Critical error during layer permission check for ${nspName}:`,
+      `[AuthZ] Critical error during permission check for ${nspName}: ${error.message}`,
       error
     );
+    // JWT 에러 종류에 따라 다른 에러 메시지 전달 가능
+    if (error.name === "JsonWebTokenError") {
+      return next(new Error("Authentication error: Invalid token signature."));
+    }
+    if (error.name === "TokenExpiredError") {
+      return next(new Error("Authentication error: Token expired."));
+    }
     return next(new Error("Internal server error during authorization."));
   }
 });
+
 layerNamespace.on("connection", async (socket) => {
   const layerId = socket.nsp.name.substring("/layer-".length);
   const user = socket.data.user;
-  logger.info(`[Layer Namespace] User connected to layer: ${layerId}`);
-  logger.info(`User connected: ${user.email}`);
+  logger.info(
+    `[Layer Namespace] User ${user.email} connected to layer: ${layerId}`
+  );
 
   /**
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
-  socket.on("request-layer-data", async (data, callback) => {
-    const { layerId } = data; // ✨ data 객체에서 layerId 추출
-    logger.info(
-      `[Yjs-Load] Received 'request-layer-data' for layer ${layerId}`
-    );
-
+  socket.on("request-layer-data", async (callback) => {
     logger.info(
       `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
     );
