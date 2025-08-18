@@ -465,6 +465,69 @@ layerNamespace.on("connection", (socket) => {
   logger.info(`[Layer Namespace] User connected to layer: ${layerId}`);
   logger.info(`User connected: ${user.email}`);
 
+  // --- ▼▼▼▼▼ Y-WebRTC v13+ 표준 시그널링 서버 로직 ▼▼▼▼▼ ---
+
+  /**
+   * 클라이언트가 시그널링 Room에 참여를 요청.
+   * Room에 이미 있는 다른 피어들의 목록을 요청한 클라이언트에게 보내줌.
+   */
+  socket.on("y-webrtc-join", async (roomName: string) => {
+    if (roomName !== layerId) {
+      // 클라이언트가 접속한 네임스페이스와 다른 Room에 참여하려고 하면 거부 (보안 강화)
+      return;
+    }
+    socket.join(roomName);
+
+    // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
+    const otherSockets = await layerNamespace.in(roomName).fetchSockets();
+    const otherPeerIds = otherSockets
+      .map((s) => s.id)
+      .filter((id) => id !== socket.id); // 자기 자신은 제외
+
+    // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
+    socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
+
+    logger.info(
+      `[WebRTC] User ${user.email} joined y-webrtc room: ${roomName}`
+    );
+  });
+
+  /**
+   * WebRTC 시그널링 메시지를 특정 피어에게 전달(relay).
+   */
+  socket.on("y-webrtc-signal", (payload) => {
+    const { to, from, signal } = payload;
+    // 'to' 소켓 ID를 가진 특정 클라이언트에게만 메시지 전송
+    layerNamespace.to(to).emit("y-webrtc-signal", { from, signal });
+    // logger.info(`[WebRTC] Relaying signal from ${from} to ${to}`);
+  });
+
+  /**
+   * 클라이언트 연결이 끊겼을 때, Room에 있던 다른 피어들에게 알림.
+   */
+  socket.on("disconnecting", () => {
+    socket.rooms.forEach((room) => {
+      if (room !== socket.id) {
+        // `y-webrtc-left` 이벤트로 변경
+        socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
+        logger.info(`[WebRTC] User ${user.email} left y-webrtc room: ${room}`);
+      }
+    });
+  });
+
+  // --- ▲▲▲▲▲ Y-WebRTC v13+ 표준 시그널링 서버 로직 끝 ▲▲▲▲▲ ---
+
+  // y-socket.io Provider가 보내는 업데이트 메시지를 릴레이
+  socket.on("yjs-update", (update) => {
+    // 자신을 제외한 Room의 다른 클라이언트에게 브로드캐스트
+    socket.to(layerId).emit("yjs-update", update);
+  });
+
+  // y-socket.io Provider가 보내는 awareness 업데이트를 릴레이
+  socket.on("yjs-awareness", (update) => {
+    socket.to(layerId).emit("yjs-awareness", update);
+  });
+
   /**
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
@@ -534,32 +597,57 @@ layerNamespace.on("connection", (socket) => {
 //========================================
 // 6. Y-WebRTC 시그널링 전용 네임스페이스
 //========================================
+// --- 6. Y-WebRTC 시그널링 전용 네임스페이스 ---
 const webrtcNamespace = io.of("/webrtc");
-// 시그널링 서버는 단순히 메시지를 전달만 하므로, JWT 인증만으로 충분합니다.
-webrtcNamespace.use((socket, next) => {});
+
+webrtcNamespace.use((socket, next) => {
+  try {
+    const token =
+      socket.handshake.auth.token || (socket.handshake.query.token as string);
+    if (!token)
+      return next(new Error("Authentication error: No token provided."));
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+      id: number;
+      email: string;
+    };
+    socket.data.user = { id: decoded.id, email: decoded.email };
+    next();
+  } catch (err: any) {
+    logger.error("[WebRTC-Signaling Auth] Invalid token:", err.message);
+    return next(new Error("Authentication error: Invalid token."));
+  }
+});
+
 webrtcNamespace.on("connection", (socket) => {
   const user = socket.data.user;
-  logger.info(`[WebRTC-Signaling] User connected: ${user.email}`);
+  logger.info(
+    `[WebRTC-Signaling] User connected: ${user.email} (ID: ${socket.id})`
+  );
 
-  // y-webrtc 표준 이벤트 핸들러들
-  socket.on("y-webrtc-join", (roomName) => {
+  // y-webrtc v13+ 표준 이벤트 핸들러들
+  socket.on("y-webrtc-join", async (roomName) => {
     socket.join(roomName);
 
-    // 이 소켓을 제외한 다른 모든 소켓들에게 새로운 피어가 들어왔음을 알림
-    socket
-      .to(roomName)
-      .emit("y-webrtc-awareness-update", { peerId: socket.id });
+    // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
+    const otherSockets = await webrtcNamespace.in(roomName).fetchSockets();
+    const otherPeerIds = otherSockets
+      .map((s) => s.id)
+      .filter((id) => id !== socket.id);
+
+    // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
+    socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
     logger.info(
       `[WebRTC-Signaling] User ${user.email} joined room: ${roomName}`
     );
   });
 
   socket.on("y-webrtc-signal", ({ to, signal }) => {
+    // 이 네임스페이스 내에서 특정 소켓에게만 메시지 전송
     webrtcNamespace.to(to).emit("y-webrtc-signal", { from: socket.id, signal });
   });
 
   socket.on("y-webrtc-awareness-update", (payload) => {
-    // 받은 awareness 정보를 room의 다른 모든 피어에게 브로드캐스트
     socket.rooms.forEach((room) => {
       if (room !== socket.id) {
         socket
