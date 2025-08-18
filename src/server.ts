@@ -38,6 +38,7 @@ const io = new SocketIOServer(httpServer, {
   allowEIO3: true,
   pingTimeout: 60000, // 60초 동안 PONG을 받지 못하면 연결 해제 (기본값 5초)
   pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
+  maxHttpBufferSize: 1e8,
 });
 
 //========================================
@@ -511,7 +512,7 @@ layerNamespace.use(async (socket, next) => {
     return next(new Error("Internal server error during authorization."));
   }
 });
-layerNamespace.on("connection", (socket) => {
+layerNamespace.on("connection", async (socket) => {
   const layerId = socket.nsp.name.substring("/layer-".length);
   const user = socket.data.user;
   logger.info(`[Layer Namespace] User connected to layer: ${layerId}`);
