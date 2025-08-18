@@ -79,6 +79,15 @@ mainNamespace.on("connection", (socket) => {
     `[Main] User connected: ${socket.data.user.email} (ID: ${socket.id})`
   );
 
+  // --- ▼▼▼ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▼▼▼ ---
+  socket.on("main-ping-test", () => {
+    logger.info(
+      `[Ping-Pong] Received MAIN PING from ${socket.data.user.email}. Sending MAIN PONG.`
+    );
+    socket.emit("main-pong-test");
+  });
+  // --- ▲▲▲ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▲▲▲ ---
+
   // --- 프로젝트 입장 및 초기 데이터 전송 ---
   socket.on("join-project", async (projectId: string) => {
     try {
