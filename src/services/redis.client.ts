@@ -7,6 +7,7 @@ dotenv.config();
 const redisOptions = {
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT) || 6379,
+  tls: {},
   retryStrategy(times: number) {
     const delay = Math.min(times * 100, 3000); // 재시도 간격 조정
     return delay;
