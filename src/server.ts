@@ -568,8 +568,6 @@ async function startServer() {
             `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
           );
 
-          logger.info(`저기요 왜 안도는건데요?`);
-
           if (typeof callback !== "function") {
             logger.error(
               `[Yjs-Load] Callback is not a function for layer ${layerId}`
@@ -577,13 +575,8 @@ async function startServer() {
             return;
           }
 
-          logger.info(`저기요 왜 안도는건데요?22`);
-
           const redisKey = `yjs-doc:${layerId}`;
-
           const dataFromRedis = await redisClient.getBuffer(redisKey);
-
-          logger.info(`저기요 왜 안도는건데요?333`);
 
           if (dataFromRedis && dataFromRedis.length > 0) {
             logger.info(
@@ -593,38 +586,43 @@ async function startServer() {
             return;
           }
 
-          logger.info(`저기요 왜 안도는건데요?444`);
-
           logger.warn(
             `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
           );
-          const layerFromMongo = await LayerModel.findById(layerId)
-            .select("data")
-            .lean();
 
-          logger.info(`저기요 왜 안도는건데요?555`);
+          const layerFromMongoDoc = await LayerModel.findById(layerId).select(
+            "data"
+          );
 
-          if (layerFromMongo && layerFromMongo.data) {
-            // const mongoBinaryData = layerFromMongo.data as Binary;
+          if (
+            layerFromMongoDoc &&
+            layerFromMongoDoc.data &&
+            Buffer.isBuffer(layerFromMongoDoc.data)
+          ) {
+            const dataBuffer = layerFromMongoDoc.data; // 이제 이것은 확실한 Buffer 타입입니다.
 
-            // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
-            // const dataBuffer = mongoBinaryData.buffer;
-            const dataBuffer = Buffer.from(
-              layerFromMongo.data as unknown as Buffer
-            );
-
+            // Buffer가 비어있지 않은지 한번 더 확인
             if (dataBuffer.length > 0) {
+              logger.info(
+                `[Yjs-Load] Found ${dataBuffer.length} bytes in MongoDB for layer ${layerId}.`
+              );
               callback(dataBuffer);
               await redisClient.set(redisKey, dataBuffer, "EX", 86400);
               logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
             } else {
-              callback(null); // MongoDB 데이터도 비어있으면 null 반환
+              logger.warn(
+                `[Yjs-Load] Data in MongoDB is an empty Buffer for layer ${layerId}.`
+              );
+              callback(null);
             }
           } else {
+            // 데이터가 없거나, Buffer 타입이 아닌 경우
+            logger.warn(
+              `[Yjs-Load] No valid data found in MongoDB for layer ${layerId}.`
+            );
             callback(null);
           }
         } catch (error: any) {
-          // ✨ 에러 발생 시, 로그를 남기고 클라이언트에게도 에러를 알립니다.
           logger.error(
             `[Yjs-Load] CRITICAL ERROR in handler for layer ${layerId}:`,
             error
@@ -663,13 +661,10 @@ async function startServer() {
       }
     });
 
-    // ✅ 2. 클라이언트로부터 받은 문서 업데이트를 다른 클라이언트들에게 방송(broadcast)하는 핸들러를 추가합니다.
     socket.on("layer-update", (update: Buffer) => {
-      // 보낸 사람을 제외하고 같은 room(layerId)에 있는 모든 사람에게 업데이트를 전송합니다.
       socket.broadcast.to(layerId).emit("layer-update", update);
     });
 
-    // ✅ 3. 연결이 끊어지면 room에서 나갔다고 로그를 남깁니다.
     socket.on("disconnect", () => {
       logger.info(
         `[-------------Layer Namespace-------------] User ${user.email} disconnected from layer/room: ${layerId}`
