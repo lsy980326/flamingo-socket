@@ -554,20 +554,20 @@ layerNamespace.on("connection", async (socket) => {
   socket.on(
     "request-layer-data",
     async (payload: { layerId: string }, callback) => {
-      logger.info(
-        `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
-      );
-
-      if (typeof callback !== "function") {
-        logger.error(
-          `[Yjs-Load] Callback is not a function for layer ${layerId}`
-        );
-        return;
-      }
-
-      const redisKey = `yjs-doc:${layerId}`;
-
       try {
+        logger.info(
+          `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
+        );
+
+        if (typeof callback !== "function") {
+          logger.error(
+            `[Yjs-Load] Callback is not a function for layer ${layerId}`
+          );
+          return;
+        }
+
+        const redisKey = `yjs-doc:${layerId}`;
+
         const dataFromRedis = await redisClient.getBuffer(redisKey);
 
         if (dataFromRedis) {
@@ -603,22 +603,35 @@ layerNamespace.on("connection", async (socket) => {
         } else {
           callback(null);
         }
-      } catch (error) {
-        logger.error(`[Yjs] Failed to load data for layer ${layerId}:`, error);
-        callback(null);
+      } catch (error: any) {
+        // ✨ 에러 발생 시, 로그를 남기고 클라이언트에게도 에러를 알립니다.
+        logger.error(
+          `[Yjs-Load] CRITICAL ERROR in handler for layer ${layerId}:`,
+          error
+        );
+        if (typeof callback === "function") {
+          // 콜백이 있다면, 에러 상황임을 알리기 위해 null을 전달
+          callback(null);
+        }
+        // 추가적으로 에러 이벤트를 보낼 수도 있습니다.
+        socket.emit("server_error", {
+          event: "request-layer-data",
+          message: error.message,
+        });
       }
     }
   );
 
   // 클라이언트로부터 데이터 저장 요청 수신
   socket.on("save-layer-data", async (docUpdate: Buffer) => {
-    console.log(`[Yjs] Received save-layer-data event.`);
-    console.log(`[Yjs] Data type: ${typeof docUpdate}`);
-    console.log(`[Yjs] Is Buffer? ${Buffer.isBuffer(docUpdate)}`);
-    console.log(`[Yjs] Received data content:`, docUpdate);
-
-    const key = `yjs-doc:${layerId}`;
     try {
+      console.log(`[Yjs] Received save-layer-data event.`);
+      console.log(`[Yjs] Data type: ${typeof docUpdate}`);
+      console.log(`[Yjs] Is Buffer? ${Buffer.isBuffer(docUpdate)}`);
+      console.log(`[Yjs] Received data content:`, docUpdate);
+
+      const key = `yjs-doc:${layerId}`;
+
       await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
       logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
       debouncedSaveToMongo(layerId);
