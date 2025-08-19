@@ -559,12 +559,16 @@ layerNamespace.on("connection", async (socket) => {
           `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
         );
 
+        logger.info(`저기요 왜 안도는건데요?`);
+
         if (typeof callback !== "function") {
           logger.error(
             `[Yjs-Load] Callback is not a function for layer ${layerId}`
           );
           return;
         }
+
+        logger.info(`저기요 왜 안도는건데요?22`);
 
         const redisKey = `yjs-doc:${layerId}`;
 
@@ -584,6 +588,8 @@ layerNamespace.on("connection", async (socket) => {
         const layerFromMongo = await LayerModel.findById(layerId)
           .select("data")
           .lean();
+
+        logger.info(`저기요 왜 안도는건데요?333`);
 
         if (layerFromMongo && layerFromMongo.data) {
           // const mongoBinaryData = layerFromMongo.data as Binary;
