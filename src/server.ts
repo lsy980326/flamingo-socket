@@ -551,61 +551,64 @@ layerNamespace.on("connection", async (socket) => {
   /**
    * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
    */
-  socket.on("request-layer-data", async (callback) => {
-    logger.info(
-      `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
-    );
-
-    if (typeof callback !== "function") {
-      logger.error(
-        `[Yjs-Load] Callback is not a function for layer ${layerId}`
+  socket.on(
+    "request-layer-data",
+    async (payload: { layerId: string }, callback) => {
+      logger.info(
+        `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
       );
-      return;
-    }
 
-    const redisKey = `yjs-doc:${layerId}`;
-
-    try {
-      const dataFromRedis = await redisClient.getBuffer(redisKey);
-
-      if (dataFromRedis) {
-        logger.info(
-          `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
+      if (typeof callback !== "function") {
+        logger.error(
+          `[Yjs-Load] Callback is not a function for layer ${layerId}`
         );
-        callback(dataFromRedis);
         return;
       }
 
-      logger.warn(
-        `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
-      );
-      const layerFromMongo = await LayerModel.findById(layerId)
-        .select("data")
-        .lean();
+      const redisKey = `yjs-doc:${layerId}`;
 
-      if (layerFromMongo && layerFromMongo.data) {
-        // const mongoBinaryData = layerFromMongo.data as Binary;
+      try {
+        const dataFromRedis = await redisClient.getBuffer(redisKey);
 
-        // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
-        // const dataBuffer = mongoBinaryData.buffer;
-        const dataBuffer = Buffer.from(
-          layerFromMongo.data as unknown as Buffer
+        if (dataFromRedis) {
+          logger.info(
+            `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
+          );
+          callback(dataFromRedis);
+          return;
+        }
+
+        logger.warn(
+          `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
         );
+        const layerFromMongo = await LayerModel.findById(layerId)
+          .select("data")
+          .lean();
 
-        // 클라이언트에게는 순수한 Buffer만 전달
-        callback(dataBuffer);
+        if (layerFromMongo && layerFromMongo.data) {
+          // const mongoBinaryData = layerFromMongo.data as Binary;
 
-        // Redis에도 순수한 Buffer를 저장
-        await redisClient.set(redisKey, dataBuffer, "EX", 86400);
-        logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
-      } else {
+          // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
+          // const dataBuffer = mongoBinaryData.buffer;
+          const dataBuffer = Buffer.from(
+            layerFromMongo.data as unknown as Buffer
+          );
+
+          // 클라이언트에게는 순수한 Buffer만 전달
+          callback(dataBuffer);
+
+          // Redis에도 순수한 Buffer를 저장
+          await redisClient.set(redisKey, dataBuffer, "EX", 86400);
+          logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
+        } else {
+          callback(null);
+        }
+      } catch (error) {
+        logger.error(`[Yjs] Failed to load data for layer ${layerId}:`, error);
         callback(null);
       }
-    } catch (error) {
-      logger.error(`[Yjs] Failed to load data for layer ${layerId}:`, error);
-      callback(null);
     }
-  });
+  );
 
   // 클라이언트로부터 데이터 저장 요청 수신
   socket.on("save-layer-data", async (docUpdate: Buffer) => {
