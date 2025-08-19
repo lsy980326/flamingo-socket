@@ -11,6 +11,8 @@ import jwt from "jsonwebtoken";
 import { connectConsumer } from "./services/kafka.consumer";
 import connectDB from "./config/db";
 import logger from "./config/logger";
+import { createAdapter } from "@socket.io/redis-adapter"; // 어댑터 import
+import { createClient } from "redis"; // redis v4 클라이언트 생성 방식
 import redisClient from "./services/redis.client"; // Redis 클라이언트 import
 import {
   debouncedSaveToMongo,
@@ -40,6 +42,13 @@ const io = new SocketIOServer(httpServer, {
   pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
   maxHttpBufferSize: 1e8,
 });
+
+const pubClient = redisClient.duplicate();
+const subClient = redisClient.duplicate();
+
+// Socket.IO에 Redis 어댑터를 연결
+io.adapter(createAdapter(pubClient, subClient));
+logger.info("✅ Socket.IO Redis Adapter connected.");
 
 //========================================
 // 2. Express 미들웨어 및 라우트
