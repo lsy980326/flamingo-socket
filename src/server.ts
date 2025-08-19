@@ -26,748 +26,769 @@ import { PageModel } from "./models/page.model";
 import { CanvasModel } from "./models/canvas.model";
 import { LayerModel } from "./models/layer.model";
 
-//========================================
-// 1. 초기화 (Initialization)
-//========================================
-connectDB();
-connectConsumer();
+async function startServer() {
+  //========================================
+  // 1. 초기화 (Initialization)
+  //========================================
+  await connectDB();
+  connectConsumer();
 
-const app: Express = express();
-const httpServer = createServer(app);
-const io = new SocketIOServer(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
-  transports: ["websocket", "polling"],
-  // allowEIO3: true,
-  pingTimeout: 60000, // 60초 동안 PONG을 받지 못하면 연결 해제 (기본값 5초)
-  pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
-  maxHttpBufferSize: 1e8,
-});
-
-// Socket.IO에 Redis 어댑터를 연결
-io.adapter(createAdapter(pubClient, subClient));
-logger.info("✅ Socket.IO Redis Adapter connected.");
-
-//========================================
-// 2. Express 미들웨어 및 라우트
-//========================================
-app.use(cors());
-app.use(express.json());
-app.get("/", (req: Request, res: Response) => {
-  res.send("Flamingo Socket Server is running!");
-});
-
-//========================================
-// 3. 공통 JWT 인증 미들웨어 (메인 네임스페이스용)
-//========================================
-const mainJwtAuthMiddleware = (socket: Socket, next: (err?: Error) => void) => {
-  const token =
-    socket.handshake.auth.token || (socket.handshake.query.token as string);
-  if (!token)
-    return next(new Error("Authentication error: No token provided."));
-
-  jwt.verify(token, process.env.JWT_SECRET!, (err: any, decoded: any) => {
-    if (err) {
-      logger.error("[Auth] Invalid token:", err.message);
-      return next(new Error("Authentication error: Invalid token."));
-    }
-    socket.data.user = { id: decoded.id, email: decoded.email };
-    next();
-  });
-};
-
-//========================================
-// 4. 메인 네임스페이스 (`/`): 메타데이터 관리
-//========================================
-const mainNamespace = io.of("/");
-mainNamespace.use(mainJwtAuthMiddleware);
-mainNamespace.on("connection", (socket) => {
-  logger.info(
-    `[Main] User connected: ${socket.data.user.email} (ID: ${socket.id})`
-  );
-
-  // --- ▼▼▼ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▼▼▼ ---
-  socket.on("main-ping-test", () => {
-    logger.info(
-      `[Ping-Pong] Received MAIN PING from ${socket.data.user.email}. Sending MAIN PONG.`
-    );
-    socket.emit("main-pong-test");
-  });
-  // --- ▲▲▲ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▲▲▲ ---
-
-  // --- 프로젝트 입장 및 초기 데이터 전송 ---
-  socket.on("join-project", async (projectId: string) => {
-    try {
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const canJoin = project?.collaborators.some(
-        (c) => c.userId === Number(socket.data.user.id)
-      );
-      if (!canJoin)
-        return socket.emit("error", {
-          message: "Permission denied to join project.",
-        });
-
-      socket.join(projectId);
-      logger.info(
-        `[Main] User ${socket.data.user.email} joined project room: ${projectId}`
-      );
-
-      const [pages, canvases, layers] = await Promise.all([
-        PageModel.find({ projectId }).sort({ order: 1 }).lean(),
-        CanvasModel.find({ projectId }).sort({ order: 1 }).lean(),
-        LayerModel.find({ projectId }).sort({ order: 1 }).lean(), // 메타데이터만 전송
-      ]);
-      socket.emit("initial-data", { pages, canvases, layers });
-    } catch (error) {
-      socket.emit("error", { message: "Failed to join project." });
-    }
+  const app: Express = express();
+  const httpServer = createServer(app);
+  const io = new SocketIOServer(httpServer, {
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    transports: ["websocket", "polling"],
+    // allowEIO3: true,
+    pingTimeout: 60000, // 60초 동안 PONG을 받지 못하면 연결 해제 (기본값 5초)
+    pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
+    maxHttpBufferSize: 1e8,
   });
 
-  // --- 페이지/캔버스/레이어 메타데이터 CRUD 핸들러들 ---
-  socket.on("create-page", async ({ projectId, name }) => {
-    try {
-      // 권한 재확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        socket.emit("error", {
-          message: "Only owners or editors can create pages.",
-        });
-        return;
-      }
+  // Socket.IO에 Redis 어댑터를 연결
+  io.adapter(createAdapter(pubClient, subClient));
+  logger.info("✅ Socket.IO Redis Adapter connected.");
 
-      // 가장 마지막 순서 계산
-      const lastPage = await PageModel.findOne({ projectId }).sort({
-        order: -1,
-      });
-      const newOrder = lastPage ? lastPage.order + 1 : 0;
-
-      const newPage = await PageModel.create({
-        projectId,
-        name,
-        order: newOrder,
-      });
-
-      // Room에 있는 모든 클라이언트에게 브로드캐스트
-      io.to(projectId).emit("page-created", newPage);
-      logger.info(
-        `[Page] New page created in project ${projectId} by ${socket.data.user.email}`
-      );
-    } catch (error) {
-      socket.emit("error", { message: "Failed to create page." });
-    }
+  //========================================
+  // 2. Express 미들웨어 및 라우트
+  //========================================
+  app.use(cors());
+  app.use(express.json());
+  app.get("/", (req: Request, res: Response) => {
+    res.send("Flamingo Socket Server is running!");
   });
 
-  // 페이지 수정
-  socket.on("update-page", async ({ projectId, pageId, updates }) => {
-    try {
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can update pages.",
-        });
-      }
-
-      const updatedPage = await PageModel.findByIdAndUpdate(
-        pageId,
-        { $set: updates },
-        { new: true }
-      );
-
-      if (updatedPage) {
-        io.to(projectId).emit("page-updated", updatedPage);
-        logger.info(
-          `[Page] Page ${pageId} updated by ${socket.data.user.email}`
-        );
-      }
-    } catch (error) {
-      socket.emit("error", { message: "Failed to update page." });
-    }
-  });
-
-  // 페이지 삭제
-  socket.on("delete-page", async ({ projectId, pageId }) => {
-    try {
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can delete pages.",
-        });
-      }
-
-      // 연쇄 삭제: 이 페이지에 속한 모든 캔버스 ID 조회
-      const canvasesToDelete = await CanvasModel.find({ pageId }).select("_id");
-      const canvasIds = canvasesToDelete.map((c) => c._id);
-
-      // 연쇄 삭제: 해당 캔버스들에 속한 모든 레이어 삭제
-      if (canvasIds.length > 0) {
-        await LayerModel.deleteMany({ canvasId: { $in: canvasIds } });
-      }
-      // 연쇄 삭제: 해당 페이지에 속한 모든 캔버스 삭제
-      await CanvasModel.deleteMany({ pageId });
-      // 최종적으로 페이지 삭제
-      await PageModel.findByIdAndDelete(pageId);
-
-      io.to(projectId).emit("page-deleted", { pageId });
-      logger.info(
-        `[Page] Page ${pageId} and its contents deleted by ${socket.data.user.email}`
-      );
-    } catch (error) {
-      socket.emit("error", { message: "Failed to delete page." });
-    }
-  });
-
-  socket.on(
-    "create-canvas",
-    async ({ pageId, projectId, name, width, height, unit }) => {
-      try {
-        // 권한 확인 (프로젝트 참여자인지, editor 이상인지 등)
-        const project = await ProjectModel.findOne({ _id: projectId });
-        const userRole = project?.collaborators.find(
-          (c) => c.userId === Number(socket.data.user.id)
-        )?.role;
-
-        if (userRole !== "owner" && userRole !== "editor") {
-          return socket.emit("error", {
-            message: "Only owners or editors can create canvases.",
-          });
-        }
-
-        // 해당 페이지가 존재하는지 확인
-        const parentPage = await PageModel.findById(pageId);
-        if (!parentPage) {
-          return socket.emit("error", { message: "Parent page not found." });
-        }
-
-        // 순서 계산
-        const lastCanvas = await CanvasModel.findOne({ pageId }).sort({
-          order: -1,
-        });
-        const newOrder = lastCanvas ? lastCanvas.order + 1 : 0;
-
-        const newCanvas = await CanvasModel.create({
-          pageId,
-          projectId, // projectId도 함께 저장
-          name,
-          width,
-          height,
-          unit,
-          order: newOrder,
-        });
-
-        // 프로젝트 Room에 있는 모든 클라이언트에게 브로드캐스트
-        io.to(projectId).emit("canvas-created", newCanvas);
-        logger.info(
-          `[Canvas] New canvas '${name}' created on page ${pageId} by ${socket.data.user.email}`
-        );
-      } catch (error) {
-        logger.error(`[Error] Failed to create canvas:`, error);
-        socket.emit("error", { message: "Failed to create canvas." });
-      }
-    }
-  );
-
-  socket.on("update-canvas", async ({ projectId, canvasId, updates }) => {
-    try {
-      // 권한 확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can update canvases.",
-        });
-      }
-
-      const updatedCanvas = await CanvasModel.findByIdAndUpdate(
-        canvasId,
-        { $set: updates },
-        { new: true }
-      );
-
-      if (updatedCanvas) {
-        io.to(projectId).emit("canvas-updated", updatedCanvas);
-        logger.info(
-          `[Canvas] Canvas ${canvasId} updated by ${socket.data.user.email}`
-        );
-      }
-    } catch (error) {
-      socket.emit("error", { message: "Failed to update canvas." });
-    }
-  });
-
-  socket.on("delete-canvas", async ({ projectId, canvasId }) => {
-    try {
-      // 권한 확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can delete canvases.",
-        });
-      }
-
-      // 연쇄 삭제: 이 캔버스에 속한 모든 레이어 삭제
-      await LayerModel.deleteMany({ canvasId: canvasId });
-
-      // 캔버스 삭제
-      await CanvasModel.findByIdAndDelete(canvasId);
-
-      io.to(projectId).emit("canvas-deleted", { canvasId, projectId });
-      logger.info(
-        `[Canvas] Canvas ${canvasId} and its layers deleted by ${socket.data.user.email}`
-      );
-    } catch (error) {
-      socket.emit("error", { message: "Failed to delete canvas." });
-    }
-  });
-
-  socket.on("create-layer", async ({ canvasId, projectId, name, type }) => {
-    try {
-      // 권한 확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can create layers.",
-        });
-      }
-
-      // 부모 캔버스 존재 확인
-      const parentCanvas = await CanvasModel.findById(canvasId);
-      if (!parentCanvas) {
-        return socket.emit("error", { message: "Parent canvas not found." });
-      }
-
-      // 순서 계산
-      const lastLayer = await LayerModel.findOne({ canvasId }).sort({
-        order: -1,
-      });
-      const newOrder = lastLayer ? lastLayer.order + 1 : 0;
-
-      const newLayer = await LayerModel.create({
-        canvasId,
-        projectId,
-        name,
-        type,
-        order: newOrder,
-      });
-
-      // 프로젝트 Room에 브로드캐스트
-      io.to(projectId).emit("layer-created", newLayer);
-      logger.info(`[Layer] New layer '${name}' created on canvas ${canvasId}`);
-    } catch (error) {
-      logger.error(`[Error] Failed to create layer:`, error);
-      socket.emit("error", { message: "Failed to create layer." });
-    }
-  });
-
-  socket.on("update-layer", async ({ projectId, layerId, updates }) => {
-    try {
-      // 권한 확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can update layers.",
-        });
-      }
-
-      // 'data' 필드는 이 이벤트로 수정할 수 없도록 방지
-      if (updates.data) {
-        delete updates.data;
-      }
-
-      const updatedLayer = await LayerModel.findByIdAndUpdate(
-        layerId,
-        { $set: updates },
-        { new: true }
-      );
-
-      if (updatedLayer) {
-        io.to(projectId).emit("layer-updated", updatedLayer);
-        logger.info(
-          `[Layer] Layer ${layerId} updated by ${socket.data.user.email}`
-        );
-      }
-    } catch (error) {
-      socket.emit("error", { message: "Failed to update layer." });
-    }
-  });
-
-  socket.on("delete-layer", async ({ projectId, layerId }) => {
-    try {
-      // 권한 확인 (editor 이상)
-      const project = await ProjectModel.findOne({ _id: projectId });
-      const userRole = project?.collaborators.find(
-        (c) => c.userId === Number(socket.data.user.id)
-      )?.role;
-      if (userRole !== "owner" && userRole !== "editor") {
-        return socket.emit("error", {
-          message: "Only owners or editors can delete layers.",
-        });
-      }
-
-      await LayerModel.findByIdAndDelete(layerId);
-
-      io.to(projectId).emit("layer-deleted", { layerId, projectId });
-      logger.info(
-        `[Layer] Layer ${layerId} deleted by ${socket.data.user.email}`
-      );
-    } catch (error) {
-      socket.emit("error", { message: "Failed to delete layer." });
-    }
-  });
-
-  socket.on("disconnect", () => {
-    logger.info(`[Socket.IO] user disconnected: ${socket.id}`);
-  });
-});
-
-//========================================
-// 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성
-//========================================
-const layerNamespace = io.of(/^\/layer-.+$/);
-// 레이어 네임스페이스용 인증/인가 미들웨어
-layerNamespace.use(async (socket, next) => {
-  const nspName = socket.nsp.name;
-  logger.info(`[AuthZ] Attempting to connect to namespace: ${nspName}`);
-
-  try {
-    // 1. 토큰 확인
-    const token =
-      socket.handshake.auth.token || (socket.handshake.query.token as string);
-    if (!token) {
-      logger.warn(`[AuthZ] Failed for ${nspName}: No token provided.`);
-      return next(new Error("Authentication error: No token provided."));
-    }
-
-    // 2. 토큰 검증 및 유저 정보 설정
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-      id: number;
-      email: string;
-    };
-    socket.data.user = { id: decoded.id, email: decoded.email };
-    logger.info(
-      `[AuthZ] User ${decoded.email} authenticated for namespace ${nspName}.`
-    );
-
-    // 3. 레이어 ID 추출 및 조회
-    const layerId = nspName.replace("/layer-", "");
-    logger.info(`[AuthZ] Extracted layerId: ${layerId}`);
-
-    const layer = await LayerModel.findById(layerId).select("projectId").lean();
-    if (!layer) {
-      logger.warn(`[AuthZ] Layer not found for ID: ${layerId}`);
-      return next(new Error("Permission denied: Layer not found."));
-    }
-    logger.info(
-      `[AuthZ] Found layer ${layerId}, projectId: ${layer.projectId}`
-    );
-
-    // 4. 프로젝트 조회
-    const project = await ProjectModel.findOne({ _id: layer.projectId })
-      .select("collaborators")
-      .lean();
-    if (!project) {
-      logger.warn(
-        `[AuthZ] Project not found for ID: ${layer.projectId} (from layer ${layerId})`
-      );
-      return next(new Error("Permission denied: Project not found."));
-    }
-    logger.info(`[AuthZ] Found project for layer ${layerId}.`);
-
-    // 5. 권한 확인
-    const userRole = project.collaborators.find(
-      (c) => c.userId === Number(socket.data.user.id)
-    )?.role;
-
-    if (userRole !== "owner" && userRole !== "editor") {
-      logger.warn(
-        `[AuthZ] Permission denied for user ${socket.data.user.email} (role: ${userRole}) on project ${project._id}`
-      );
-      return next(new Error("Permission denied: Not an owner or editor."));
-    }
-
-    logger.info(
-      `[AuthZ] User ${socket.data.user.email} authorized with role: ${userRole}. Granting access to ${nspName}.`
-    );
-    next();
-  } catch (error: any) {
-    // 에러 타입을 any로 지정하여 message에 접근
-    logger.error(
-      `[AuthZ] Critical error during permission check for ${nspName}: ${error.message}`,
-      error
-    );
-    // JWT 에러 종류에 따라 다른 에러 메시지 전달 가능
-    if (error.name === "JsonWebTokenError") {
-      return next(new Error("Authentication error: Invalid token signature."));
-    }
-    if (error.name === "TokenExpiredError") {
-      return next(new Error("Authentication error: Token expired."));
-    }
-    return next(new Error("Internal server error during authorization."));
-  }
-});
-
-layerNamespace.on("connection", async (socket) => {
-  const layerId = socket.nsp.name.substring("/layer-".length);
-  const user = socket.data.user;
-  logger.info(
-    `[Layer Namespace] User ${user.email} connected to layer: ${layerId}`
-  );
-
-  socket.join(layerId);
-  logger.info(
-    `[-------------Layer Namespace-------------] User ${user.email} joined room: ${layerId}`
-  );
-
-  // --- ▼▼▼ Ping-Pong 테스트 코드 추가 ▼▼▼ ---
-  socket.on("ping-test", () => {
-    logger.info(
-      `[Ping-Pong] Received PING from ${user.email} on layer ${layerId}. Sending PONG.`
-    );
-    socket.emit("pong-test");
-  });
-  // --- ▲▲▲ Ping-Pong 테스트 코드 추가 ▲▲▲ ---
-
-  /**
-   * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
-   */
-  socket.on(
-    "request-layer-data",
-    async (payload: { layerId: string }, callback) => {
-      try {
-        logger.info(
-          `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
-        );
-
-        logger.info(`저기요 왜 안도는건데요?`);
-
-        if (typeof callback !== "function") {
-          logger.error(
-            `[Yjs-Load] Callback is not a function for layer ${layerId}`
-          );
-          return;
-        }
-
-        logger.info(`저기요 왜 안도는건데요?22`);
-
-        const redisKey = `yjs-doc:${layerId}`;
-
-        const dataFromRedis = await redisClient.getBuffer(redisKey);
-
-        logger.info(`저기요 왜 안도는건데요?333`);
-
-        if (dataFromRedis) {
-          logger.info(
-            `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
-          );
-          callback(dataFromRedis);
-          return;
-        }
-
-        logger.info(`저기요 왜 안도는건데요?444`);
-
-        logger.warn(
-          `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
-        );
-        const layerFromMongo = await LayerModel.findById(layerId)
-          .select("data")
-          .lean();
-
-        logger.info(`저기요 왜 안도는건데요?555`);
-
-        if (layerFromMongo && layerFromMongo.data) {
-          // const mongoBinaryData = layerFromMongo.data as Binary;
-
-          // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
-          // const dataBuffer = mongoBinaryData.buffer;
-          const dataBuffer = Buffer.from(
-            layerFromMongo.data as unknown as Buffer
-          );
-
-          // 클라이언트에게는 순수한 Buffer만 전달
-          callback(dataBuffer);
-
-          // Redis에도 순수한 Buffer를 저장
-          await redisClient.set(redisKey, dataBuffer, "EX", 86400);
-          logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
-        } else {
-          callback(null);
-        }
-      } catch (error: any) {
-        // ✨ 에러 발생 시, 로그를 남기고 클라이언트에게도 에러를 알립니다.
-        logger.error(
-          `[Yjs-Load] CRITICAL ERROR in handler for layer ${layerId}:`,
-          error
-        );
-        if (typeof callback === "function") {
-          // 콜백이 있다면, 에러 상황임을 알리기 위해 null을 전달
-          callback(null);
-        }
-        // 추가적으로 에러 이벤트를 보낼 수도 있습니다.
-        socket.emit("server_error", {
-          event: "request-layer-data",
-          message: error.message,
-        });
-      }
-    }
-  );
-
-  // 클라이언트로부터 데이터 저장 요청 수신
-  socket.on("save-layer-data", async (docUpdate: Buffer) => {
-    try {
-      console.log(`[Yjs] Received save-layer-data event.`);
-      console.log(`[Yjs] Data type: ${typeof docUpdate}`);
-      console.log(`[Yjs] Is Buffer? ${Buffer.isBuffer(docUpdate)}`);
-      console.log(`[Yjs] Received data content:`, docUpdate);
-
-      const key = `yjs-doc:${layerId}`;
-
-      await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
-      logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
-      debouncedSaveToMongo(layerId);
-    } catch (error) {
-      logger.error(`[Yjs] Failed to save data for layer ${layerId}:`, error);
-      socket.emit("error", {
-        message: `Failed to save layer data for ${layerId}`,
-      });
-    }
-  });
-
-  // ✅ 2. 클라이언트로부터 받은 문서 업데이트를 다른 클라이언트들에게 방송(broadcast)하는 핸들러를 추가합니다.
-  socket.on("layer-update", (update: Buffer) => {
-    // 보낸 사람을 제외하고 같은 room(layerId)에 있는 모든 사람에게 업데이트를 전송합니다.
-    socket.broadcast.to(layerId).emit("layer-update", update);
-  });
-
-  // ✅ 3. 연결이 끊어지면 room에서 나갔다고 로그를 남깁니다.
-  socket.on("disconnect", () => {
-    logger.info(
-      `[-------------Layer Namespace-------------] User ${user.email} disconnected from layer/room: ${layerId}`
-    );
-  });
-});
-
-//========================================
-// 6. Y-WebRTC 시그널링 전용 네임스페이스
-//========================================
-// --- 6. Y-WebRTC 시그널링 전용 네임스페이스 ---
-const webrtcNamespace = io.of("/webrtc");
-
-webrtcNamespace.use((socket, next) => {
-  try {
+  //========================================
+  // 3. 공통 JWT 인증 미들웨어 (메인 네임스페이스용)
+  //========================================
+  const mainJwtAuthMiddleware = (
+    socket: Socket,
+    next: (err?: Error) => void
+  ) => {
     const token =
       socket.handshake.auth.token || (socket.handshake.query.token as string);
     if (!token)
       return next(new Error("Authentication error: No token provided."));
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-      id: number;
-      email: string;
-    };
-    socket.data.user = { id: decoded.id, email: decoded.email };
-    next();
-  } catch (err: any) {
-    logger.error("[WebRTC-Signaling Auth] Invalid token:", err.message);
-    return next(new Error("Authentication error: Invalid token."));
-  }
-});
+    jwt.verify(token, process.env.JWT_SECRET!, (err: any, decoded: any) => {
+      if (err) {
+        logger.error("[Auth] Invalid token:", err.message);
+        return next(new Error("Authentication error: Invalid token."));
+      }
+      socket.data.user = { id: decoded.id, email: decoded.email };
+      next();
+    });
+  };
 
-webrtcNamespace.on("connection", (socket) => {
-  const user = socket.data.user;
-  logger.info(
-    `[WebRTC-Signaling] User connected: ${user.email} (ID: ${socket.id})`
-  );
-
-  // y-webrtc v13+ 표준 이벤트 핸들러들
-  socket.on("y-webrtc-join", async (roomName) => {
-    socket.join(roomName);
-
-    // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
-    const otherSockets = await webrtcNamespace.in(roomName).fetchSockets();
-    const otherPeerIds = otherSockets
-      .map((s) => s.id)
-      .filter((id) => id !== socket.id);
-
-    // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
-    socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
+  //========================================
+  // 4. 메인 네임스페이스 (`/`): 메타데이터 관리
+  //========================================
+  const mainNamespace = io.of("/");
+  mainNamespace.use(mainJwtAuthMiddleware);
+  mainNamespace.on("connection", (socket) => {
     logger.info(
-      `[WebRTC-Signaling] User ${user.email} joined room: ${roomName}`
+      `[Main] User connected: ${socket.data.user.email} (ID: ${socket.id})`
     );
-  });
 
-  socket.on("y-webrtc-signal", ({ to, signal }) => {
-    // 이 네임스페이스 내에서 특정 소켓에게만 메시지 전송
-    webrtcNamespace.to(to).emit("y-webrtc-signal", { from: socket.id, signal });
-  });
+    // --- ▼▼▼ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▼▼▼ ---
+    socket.on("main-ping-test", () => {
+      logger.info(
+        `[Ping-Pong] Received MAIN PING from ${socket.data.user.email}. Sending MAIN PONG.`
+      );
+      socket.emit("main-pong-test");
+    });
+    // --- ▲▲▲ 메인 네임스페이스 Ping-Pong 테스트 코드 추가 ▲▲▲ ---
 
-  socket.on("y-webrtc-awareness-update", (payload) => {
-    socket.rooms.forEach((room) => {
-      if (room !== socket.id) {
-        socket
-          .to(room)
-          .emit("y-webrtc-awareness-update", { ...payload, peerId: socket.id });
+    // --- 프로젝트 입장 및 초기 데이터 전송 ---
+    socket.on("join-project", async (projectId: string) => {
+      try {
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const canJoin = project?.collaborators.some(
+          (c) => c.userId === Number(socket.data.user.id)
+        );
+        if (!canJoin)
+          return socket.emit("error", {
+            message: "Permission denied to join project.",
+          });
+
+        socket.join(projectId);
+        logger.info(
+          `[Main] User ${socket.data.user.email} joined project room: ${projectId}`
+        );
+
+        const [pages, canvases, layers] = await Promise.all([
+          PageModel.find({ projectId }).sort({ order: 1 }).lean(),
+          CanvasModel.find({ projectId }).sort({ order: 1 }).lean(),
+          LayerModel.find({ projectId }).sort({ order: 1 }).lean(), // 메타데이터만 전송
+        ]);
+        socket.emit("initial-data", { pages, canvases, layers });
+      } catch (error) {
+        socket.emit("error", { message: "Failed to join project." });
       }
+    });
+
+    // --- 페이지/캔버스/레이어 메타데이터 CRUD 핸들러들 ---
+    socket.on("create-page", async ({ projectId, name }) => {
+      try {
+        // 권한 재확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          socket.emit("error", {
+            message: "Only owners or editors can create pages.",
+          });
+          return;
+        }
+
+        // 가장 마지막 순서 계산
+        const lastPage = await PageModel.findOne({ projectId }).sort({
+          order: -1,
+        });
+        const newOrder = lastPage ? lastPage.order + 1 : 0;
+
+        const newPage = await PageModel.create({
+          projectId,
+          name,
+          order: newOrder,
+        });
+
+        // Room에 있는 모든 클라이언트에게 브로드캐스트
+        io.to(projectId).emit("page-created", newPage);
+        logger.info(
+          `[Page] New page created in project ${projectId} by ${socket.data.user.email}`
+        );
+      } catch (error) {
+        socket.emit("error", { message: "Failed to create page." });
+      }
+    });
+
+    // 페이지 수정
+    socket.on("update-page", async ({ projectId, pageId, updates }) => {
+      try {
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can update pages.",
+          });
+        }
+
+        const updatedPage = await PageModel.findByIdAndUpdate(
+          pageId,
+          { $set: updates },
+          { new: true }
+        );
+
+        if (updatedPage) {
+          io.to(projectId).emit("page-updated", updatedPage);
+          logger.info(
+            `[Page] Page ${pageId} updated by ${socket.data.user.email}`
+          );
+        }
+      } catch (error) {
+        socket.emit("error", { message: "Failed to update page." });
+      }
+    });
+
+    // 페이지 삭제
+    socket.on("delete-page", async ({ projectId, pageId }) => {
+      try {
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can delete pages.",
+          });
+        }
+
+        // 연쇄 삭제: 이 페이지에 속한 모든 캔버스 ID 조회
+        const canvasesToDelete = await CanvasModel.find({ pageId }).select(
+          "_id"
+        );
+        const canvasIds = canvasesToDelete.map((c) => c._id);
+
+        // 연쇄 삭제: 해당 캔버스들에 속한 모든 레이어 삭제
+        if (canvasIds.length > 0) {
+          await LayerModel.deleteMany({ canvasId: { $in: canvasIds } });
+        }
+        // 연쇄 삭제: 해당 페이지에 속한 모든 캔버스 삭제
+        await CanvasModel.deleteMany({ pageId });
+        // 최종적으로 페이지 삭제
+        await PageModel.findByIdAndDelete(pageId);
+
+        io.to(projectId).emit("page-deleted", { pageId });
+        logger.info(
+          `[Page] Page ${pageId} and its contents deleted by ${socket.data.user.email}`
+        );
+      } catch (error) {
+        socket.emit("error", { message: "Failed to delete page." });
+      }
+    });
+
+    socket.on(
+      "create-canvas",
+      async ({ pageId, projectId, name, width, height, unit }) => {
+        try {
+          // 권한 확인 (프로젝트 참여자인지, editor 이상인지 등)
+          const project = await ProjectModel.findOne({ _id: projectId });
+          const userRole = project?.collaborators.find(
+            (c) => c.userId === Number(socket.data.user.id)
+          )?.role;
+
+          if (userRole !== "owner" && userRole !== "editor") {
+            return socket.emit("error", {
+              message: "Only owners or editors can create canvases.",
+            });
+          }
+
+          // 해당 페이지가 존재하는지 확인
+          const parentPage = await PageModel.findById(pageId);
+          if (!parentPage) {
+            return socket.emit("error", { message: "Parent page not found." });
+          }
+
+          // 순서 계산
+          const lastCanvas = await CanvasModel.findOne({ pageId }).sort({
+            order: -1,
+          });
+          const newOrder = lastCanvas ? lastCanvas.order + 1 : 0;
+
+          const newCanvas = await CanvasModel.create({
+            pageId,
+            projectId, // projectId도 함께 저장
+            name,
+            width,
+            height,
+            unit,
+            order: newOrder,
+          });
+
+          // 프로젝트 Room에 있는 모든 클라이언트에게 브로드캐스트
+          io.to(projectId).emit("canvas-created", newCanvas);
+          logger.info(
+            `[Canvas] New canvas '${name}' created on page ${pageId} by ${socket.data.user.email}`
+          );
+        } catch (error) {
+          logger.error(`[Error] Failed to create canvas:`, error);
+          socket.emit("error", { message: "Failed to create canvas." });
+        }
+      }
+    );
+
+    socket.on("update-canvas", async ({ projectId, canvasId, updates }) => {
+      try {
+        // 권한 확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can update canvases.",
+          });
+        }
+
+        const updatedCanvas = await CanvasModel.findByIdAndUpdate(
+          canvasId,
+          { $set: updates },
+          { new: true }
+        );
+
+        if (updatedCanvas) {
+          io.to(projectId).emit("canvas-updated", updatedCanvas);
+          logger.info(
+            `[Canvas] Canvas ${canvasId} updated by ${socket.data.user.email}`
+          );
+        }
+      } catch (error) {
+        socket.emit("error", { message: "Failed to update canvas." });
+      }
+    });
+
+    socket.on("delete-canvas", async ({ projectId, canvasId }) => {
+      try {
+        // 권한 확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can delete canvases.",
+          });
+        }
+
+        // 연쇄 삭제: 이 캔버스에 속한 모든 레이어 삭제
+        await LayerModel.deleteMany({ canvasId: canvasId });
+
+        // 캔버스 삭제
+        await CanvasModel.findByIdAndDelete(canvasId);
+
+        io.to(projectId).emit("canvas-deleted", { canvasId, projectId });
+        logger.info(
+          `[Canvas] Canvas ${canvasId} and its layers deleted by ${socket.data.user.email}`
+        );
+      } catch (error) {
+        socket.emit("error", { message: "Failed to delete canvas." });
+      }
+    });
+
+    socket.on("create-layer", async ({ canvasId, projectId, name, type }) => {
+      try {
+        // 권한 확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can create layers.",
+          });
+        }
+
+        // 부모 캔버스 존재 확인
+        const parentCanvas = await CanvasModel.findById(canvasId);
+        if (!parentCanvas) {
+          return socket.emit("error", { message: "Parent canvas not found." });
+        }
+
+        // 순서 계산
+        const lastLayer = await LayerModel.findOne({ canvasId }).sort({
+          order: -1,
+        });
+        const newOrder = lastLayer ? lastLayer.order + 1 : 0;
+
+        const newLayer = await LayerModel.create({
+          canvasId,
+          projectId,
+          name,
+          type,
+          order: newOrder,
+        });
+
+        // 프로젝트 Room에 브로드캐스트
+        io.to(projectId).emit("layer-created", newLayer);
+        logger.info(
+          `[Layer] New layer '${name}' created on canvas ${canvasId}`
+        );
+      } catch (error) {
+        logger.error(`[Error] Failed to create layer:`, error);
+        socket.emit("error", { message: "Failed to create layer." });
+      }
+    });
+
+    socket.on("update-layer", async ({ projectId, layerId, updates }) => {
+      try {
+        // 권한 확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can update layers.",
+          });
+        }
+
+        // 'data' 필드는 이 이벤트로 수정할 수 없도록 방지
+        if (updates.data) {
+          delete updates.data;
+        }
+
+        const updatedLayer = await LayerModel.findByIdAndUpdate(
+          layerId,
+          { $set: updates },
+          { new: true }
+        );
+
+        if (updatedLayer) {
+          io.to(projectId).emit("layer-updated", updatedLayer);
+          logger.info(
+            `[Layer] Layer ${layerId} updated by ${socket.data.user.email}`
+          );
+        }
+      } catch (error) {
+        socket.emit("error", { message: "Failed to update layer." });
+      }
+    });
+
+    socket.on("delete-layer", async ({ projectId, layerId }) => {
+      try {
+        // 권한 확인 (editor 이상)
+        const project = await ProjectModel.findOne({ _id: projectId });
+        const userRole = project?.collaborators.find(
+          (c) => c.userId === Number(socket.data.user.id)
+        )?.role;
+        if (userRole !== "owner" && userRole !== "editor") {
+          return socket.emit("error", {
+            message: "Only owners or editors can delete layers.",
+          });
+        }
+
+        await LayerModel.findByIdAndDelete(layerId);
+
+        io.to(projectId).emit("layer-deleted", { layerId, projectId });
+        logger.info(
+          `[Layer] Layer ${layerId} deleted by ${socket.data.user.email}`
+        );
+      } catch (error) {
+        socket.emit("error", { message: "Failed to delete layer." });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      logger.info(`[Socket.IO] user disconnected: ${socket.id}`);
     });
   });
 
-  socket.on("disconnecting", () => {
-    socket.rooms.forEach((room) => {
-      if (room !== socket.id) {
-        socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
+  //========================================
+  // 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성
+  //========================================
+  const layerNamespace = io.of(/^\/layer-.+$/);
+  // 레이어 네임스페이스용 인증/인가 미들웨어
+  layerNamespace.use(async (socket, next) => {
+    const nspName = socket.nsp.name;
+    logger.info(`[AuthZ] Attempting to connect to namespace: ${nspName}`);
+
+    try {
+      // 1. 토큰 확인
+      const token =
+        socket.handshake.auth.token || (socket.handshake.query.token as string);
+      if (!token) {
+        logger.warn(`[AuthZ] Failed for ${nspName}: No token provided.`);
+        return next(new Error("Authentication error: No token provided."));
+      }
+
+      // 2. 토큰 검증 및 유저 정보 설정
+      const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+        id: number;
+        email: string;
+      };
+      socket.data.user = { id: decoded.id, email: decoded.email };
+      logger.info(
+        `[AuthZ] User ${decoded.email} authenticated for namespace ${nspName}.`
+      );
+
+      // 3. 레이어 ID 추출 및 조회
+      const layerId = nspName.replace("/layer-", "");
+      logger.info(`[AuthZ] Extracted layerId: ${layerId}`);
+
+      const layer = await LayerModel.findById(layerId)
+        .select("projectId")
+        .lean();
+      if (!layer) {
+        logger.warn(`[AuthZ] Layer not found for ID: ${layerId}`);
+        return next(new Error("Permission denied: Layer not found."));
+      }
+      logger.info(
+        `[AuthZ] Found layer ${layerId}, projectId: ${layer.projectId}`
+      );
+
+      // 4. 프로젝트 조회
+      const project = await ProjectModel.findOne({ _id: layer.projectId })
+        .select("collaborators")
+        .lean();
+      if (!project) {
+        logger.warn(
+          `[AuthZ] Project not found for ID: ${layer.projectId} (from layer ${layerId})`
+        );
+        return next(new Error("Permission denied: Project not found."));
+      }
+      logger.info(`[AuthZ] Found project for layer ${layerId}.`);
+
+      // 5. 권한 확인
+      const userRole = project.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+
+      if (userRole !== "owner" && userRole !== "editor") {
+        logger.warn(
+          `[AuthZ] Permission denied for user ${socket.data.user.email} (role: ${userRole}) on project ${project._id}`
+        );
+        return next(new Error("Permission denied: Not an owner or editor."));
+      }
+
+      logger.info(
+        `[AuthZ] User ${socket.data.user.email} authorized with role: ${userRole}. Granting access to ${nspName}.`
+      );
+      next();
+    } catch (error: any) {
+      // 에러 타입을 any로 지정하여 message에 접근
+      logger.error(
+        `[AuthZ] Critical error during permission check for ${nspName}: ${error.message}`,
+        error
+      );
+      // JWT 에러 종류에 따라 다른 에러 메시지 전달 가능
+      if (error.name === "JsonWebTokenError") {
+        return next(
+          new Error("Authentication error: Invalid token signature.")
+        );
+      }
+      if (error.name === "TokenExpiredError") {
+        return next(new Error("Authentication error: Token expired."));
+      }
+      return next(new Error("Internal server error during authorization."));
+    }
+  });
+
+  layerNamespace.on("connection", async (socket) => {
+    const layerId = socket.nsp.name.substring("/layer-".length);
+    const user = socket.data.user;
+    logger.info(
+      `[Layer Namespace] User ${user.email} connected to layer: ${layerId}`
+    );
+
+    socket.join(layerId);
+    logger.info(
+      `[-------------Layer Namespace-------------] User ${user.email} joined room: ${layerId}`
+    );
+
+    // --- ▼▼▼ Ping-Pong 테스트 코드 추가 ▼▼▼ ---
+    socket.on("ping-test", () => {
+      logger.info(
+        `[Ping-Pong] Received PING from ${user.email} on layer ${layerId}. Sending PONG.`
+      );
+      socket.emit("pong-test");
+    });
+    // --- ▲▲▲ Ping-Pong 테스트 코드 추가 ▲▲▲ ---
+
+    /**
+     * 클라이언트가 특정 레이어의 최신 데이터 스냅샷을 요청
+     */
+    socket.on(
+      "request-layer-data",
+      async (payload: { layerId: string }, callback) => {
+        try {
+          logger.info(
+            `[Yjs-Load] Received 'request-layer-data' from ${user.email} for layer ${layerId}`
+          );
+
+          logger.info(`저기요 왜 안도는건데요?`);
+
+          if (typeof callback !== "function") {
+            logger.error(
+              `[Yjs-Load] Callback is not a function for layer ${layerId}`
+            );
+            return;
+          }
+
+          logger.info(`저기요 왜 안도는건데요?22`);
+
+          const redisKey = `yjs-doc:${layerId}`;
+
+          const dataFromRedis = await redisClient.getBuffer(redisKey);
+
+          logger.info(`저기요 왜 안도는건데요?333`);
+
+          if (dataFromRedis) {
+            logger.info(
+              `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
+            );
+            callback(dataFromRedis);
+            return;
+          }
+
+          logger.info(`저기요 왜 안도는건데요?444`);
+
+          logger.warn(
+            `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
+          );
+          const layerFromMongo = await LayerModel.findById(layerId)
+            .select("data")
+            .lean();
+
+          logger.info(`저기요 왜 안도는건데요?555`);
+
+          if (layerFromMongo && layerFromMongo.data) {
+            // const mongoBinaryData = layerFromMongo.data as Binary;
+
+            // // Mongoose/MongoDB의 Binary 객체에서 순수한 Buffer를 추출
+            // const dataBuffer = mongoBinaryData.buffer;
+            const dataBuffer = Buffer.from(
+              layerFromMongo.data as unknown as Buffer
+            );
+
+            // 클라이언트에게는 순수한 Buffer만 전달
+            callback(dataBuffer);
+
+            // Redis에도 순수한 Buffer를 저장
+            await redisClient.set(redisKey, dataBuffer, "EX", 86400);
+            logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
+          } else {
+            callback(null);
+          }
+        } catch (error: any) {
+          // ✨ 에러 발생 시, 로그를 남기고 클라이언트에게도 에러를 알립니다.
+          logger.error(
+            `[Yjs-Load] CRITICAL ERROR in handler for layer ${layerId}:`,
+            error
+          );
+          if (typeof callback === "function") {
+            // 콜백이 있다면, 에러 상황임을 알리기 위해 null을 전달
+            callback(null);
+          }
+          // 추가적으로 에러 이벤트를 보낼 수도 있습니다.
+          socket.emit("server_error", {
+            event: "request-layer-data",
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // 클라이언트로부터 데이터 저장 요청 수신
+    socket.on("save-layer-data", async (docUpdate: Buffer) => {
+      try {
+        console.log(`[Yjs] Received save-layer-data event.`);
+        console.log(`[Yjs] Data type: ${typeof docUpdate}`);
+        console.log(`[Yjs] Is Buffer? ${Buffer.isBuffer(docUpdate)}`);
+        console.log(`[Yjs] Received data content:`, docUpdate);
+
+        const key = `yjs-doc:${layerId}`;
+
+        await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
+        logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
+        debouncedSaveToMongo(layerId);
+      } catch (error) {
+        logger.error(`[Yjs] Failed to save data for layer ${layerId}:`, error);
+        socket.emit("error", {
+          message: `Failed to save layer data for ${layerId}`,
+        });
       }
     });
-  });
-});
 
-//========================================
-// 7. 5. Graceful Shutdown Logic
-//========================================
-const gracefulShutdown = () => {
-  logger.info("Received kill signal, initiating graceful shutdown...");
+    // ✅ 2. 클라이언트로부터 받은 문서 업데이트를 다른 클라이언트들에게 방송(broadcast)하는 핸들러를 추가합니다.
+    socket.on("layer-update", (update: Buffer) => {
+      // 보낸 사람을 제외하고 같은 room(layerId)에 있는 모든 사람에게 업데이트를 전송합니다.
+      socket.broadcast.to(layerId).emit("layer-update", update);
+    });
 
-  // 현재 Debounce 대기열에 있는 모든 DB 저장 작업을 즉시 실행
-  flushAllPendingSaves();
-
-  // 서버가 새로운 연결을 더 이상 받지않음음
-  httpServer.close(() => {
-    logger.info("All connections closed. Server is shutting down.");
-    // 모든 작업이 완료되면 프로세스를 종료.
-    process.exit(0);
+    // ✅ 3. 연결이 끊어지면 room에서 나갔다고 로그를 남깁니다.
+    socket.on("disconnect", () => {
+      logger.info(
+        `[-------------Layer Namespace-------------] User ${user.email} disconnected from layer/room: ${layerId}`
+      );
+    });
   });
 
-  setTimeout(() => {
-    logger.error(
-      "Could not close connections in time, forcefully shutting down."
+  //========================================
+  // 6. Y-WebRTC 시그널링 전용 네임스페이스
+  //========================================
+  // --- 6. Y-WebRTC 시그널링 전용 네임스페이스 ---
+  const webrtcNamespace = io.of("/webrtc");
+
+  webrtcNamespace.use((socket, next) => {
+    try {
+      const token =
+        socket.handshake.auth.token || (socket.handshake.query.token as string);
+      if (!token)
+        return next(new Error("Authentication error: No token provided."));
+
+      const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+        id: number;
+        email: string;
+      };
+      socket.data.user = { id: decoded.id, email: decoded.email };
+      next();
+    } catch (err: any) {
+      logger.error("[WebRTC-Signaling Auth] Invalid token:", err.message);
+      return next(new Error("Authentication error: Invalid token."));
+    }
+  });
+
+  webrtcNamespace.on("connection", (socket) => {
+    const user = socket.data.user;
+    logger.info(
+      `[WebRTC-Signaling] User connected: ${user.email} (ID: ${socket.id})`
     );
-    process.exit(1);
-  }, 5000); // 5초
-};
 
-// 종료 신호 리스너 등록
-process.on("SIGTERM", gracefulShutdown); // 예: `kill` 명령어, AWS ECS, Kubernetes
-process.on("SIGINT", gracefulShutdown); // 예: `Ctrl+C` in terminal
+    // y-webrtc v13+ 표준 이벤트 핸들러들
+    socket.on("y-webrtc-join", async (roomName) => {
+      socket.join(roomName);
 
-//========================================
-// 8. 서버 실행
-//========================================
-const PORT = process.env.PORT || 8080;
-httpServer.listen(PORT, () => {
-  logger.info(`[Server] Server is running at http://localhost:${PORT}`);
+      // 현재 Room에 있는 다른 소켓들의 ID 목록을 가져옴
+      const otherSockets = await webrtcNamespace.in(roomName).fetchSockets();
+      const otherPeerIds = otherSockets
+        .map((s) => s.id)
+        .filter((id) => id !== socket.id);
+
+      // 요청한 클라이언트에게만 기존 피어 목록을 알려줌
+      socket.emit("y-webrtc-joined", { room: roomName, peers: otherPeerIds });
+      logger.info(
+        `[WebRTC-Signaling] User ${user.email} joined room: ${roomName}`
+      );
+    });
+
+    socket.on("y-webrtc-signal", ({ to, signal }) => {
+      // 이 네임스페이스 내에서 특정 소켓에게만 메시지 전송
+      webrtcNamespace
+        .to(to)
+        .emit("y-webrtc-signal", { from: socket.id, signal });
+    });
+
+    socket.on("y-webrtc-awareness-update", (payload) => {
+      socket.rooms.forEach((room) => {
+        if (room !== socket.id) {
+          socket.to(room).emit("y-webrtc-awareness-update", {
+            ...payload,
+            peerId: socket.id,
+          });
+        }
+      });
+    });
+
+    socket.on("disconnecting", () => {
+      socket.rooms.forEach((room) => {
+        if (room !== socket.id) {
+          socket.to(room).emit("y-webrtc-left", { room, peerId: socket.id });
+        }
+      });
+    });
+  });
+
+  //========================================
+  // 7. 5. Graceful Shutdown Logic
+  //========================================
+  const gracefulShutdown = () => {
+    logger.info("Received kill signal, initiating graceful shutdown...");
+
+    // 현재 Debounce 대기열에 있는 모든 DB 저장 작업을 즉시 실행
+    flushAllPendingSaves();
+
+    // 서버가 새로운 연결을 더 이상 받지않음음
+    httpServer.close(() => {
+      logger.info("All connections closed. Server is shutting down.");
+      // 모든 작업이 완료되면 프로세스를 종료.
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      logger.error(
+        "Could not close connections in time, forcefully shutting down."
+      );
+      process.exit(1);
+    }, 5000); // 5초
+  };
+
+  // 종료 신호 리스너 등록
+  process.on("SIGTERM", gracefulShutdown); // 예: `kill` 명령어, AWS ECS, Kubernetes
+  process.on("SIGINT", gracefulShutdown); // 예: `Ctrl+C` in terminal
+
+  //========================================
+  // 8. 서버 실행
+  //========================================
+  const PORT = process.env.PORT || 8080;
+  httpServer.listen(PORT, () => {
+    logger.info(`[Server] Server is running at http://localhost:${PORT}`);
+  });
+}
+
+startServer().catch((error) => {
+  logger.error("Failed to start server:", error);
+  process.exit(1);
 });
