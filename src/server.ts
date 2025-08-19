@@ -585,7 +585,7 @@ async function startServer() {
 
           logger.info(`저기요 왜 안도는건데요?333`);
 
-          if (dataFromRedis) {
+          if (dataFromRedis && dataFromRedis.length > 0) {
             logger.info(
               `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
             );
@@ -613,12 +613,13 @@ async function startServer() {
               layerFromMongo.data as unknown as Buffer
             );
 
-            // 클라이언트에게는 순수한 Buffer만 전달
-            callback(dataBuffer);
-
-            // Redis에도 순수한 Buffer를 저장
-            await redisClient.set(redisKey, dataBuffer, "EX", 86400);
-            logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
+            if (dataBuffer.length > 0) {
+              callback(dataBuffer);
+              await redisClient.set(redisKey, dataBuffer, "EX", 86400);
+              logger.info(`[Yjs] Warmed up Redis cache for layer ${layerId}.`);
+            } else {
+              callback(null); // MongoDB 데이터도 비어있으면 null 반환
+            }
           } else {
             callback(null);
           }
