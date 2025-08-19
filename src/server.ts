@@ -574,6 +574,8 @@ layerNamespace.on("connection", async (socket) => {
 
         const dataFromRedis = await redisClient.getBuffer(redisKey);
 
+        logger.info(`저기요 왜 안도는건데요?333`);
+
         if (dataFromRedis) {
           logger.info(
             `[Yjs-Load] Sending ${dataFromRedis.length} bytes from Redis for layer ${layerId}`
@@ -582,6 +584,8 @@ layerNamespace.on("connection", async (socket) => {
           return;
         }
 
+        logger.info(`저기요 왜 안도는건데요?444`);
+
         logger.warn(
           `[Yjs] Cache miss for layer ${layerId}. Loading from MongoDB.`
         );
@@ -589,7 +593,7 @@ layerNamespace.on("connection", async (socket) => {
           .select("data")
           .lean();
 
-        logger.info(`저기요 왜 안도는건데요?333`);
+        logger.info(`저기요 왜 안도는건데요?555`);
 
         if (layerFromMongo && layerFromMongo.data) {
           // const mongoBinaryData = layerFromMongo.data as Binary;
