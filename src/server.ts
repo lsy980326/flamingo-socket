@@ -4,6 +4,7 @@ dotenv.config();
 import express, { Express, Request, Response } from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer, Socket } from "socket.io";
+import { YSocketIO } from "y-socket.io/dist/server";
 import cors from "cors";
 import jwt from "jsonwebtoken";
 
@@ -43,6 +44,53 @@ async function startServer() {
     pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
     maxHttpBufferSize: 1e8,
   });
+
+  const ysocketioProvider = new YSocketIO(io);
+  ysocketioProvider.initialize();
+
+  // ========================================
+  // ▼▼▼ YSocketIO 이벤트 리스너 추가 ▼▼▼
+  // ========================================
+
+  ysocketioProvider.on("document-loaded", (doc) => {
+    // doc.name은 "/layer-레이어ID"와 같은 네임스페이스 이름입니다.
+    logger.info(`[Y.Doc] Document '${doc.name}' was loaded into memory.`);
+
+    /**
+     * 문서가 로드되었을 때, 해당 문서의 'update' 이벤트에 리스너를 연결
+     * 이 리스너는 문서 내용이 변경될 때마다 호출
+     */
+    doc.on("update", (update: Uint8Array) => {
+      logger.info(`[Y.Doc Update] Document '${doc.name}' was updated.`);
+      // 여기에 update (Uint8Array)를 사용한 DB 저장 로직 등을 연결할 수 있습니다.
+      // 예: debouncedSaveToMongo(doc.name.replace('/layer-', ''), Y.encodeStateAsUpdate(doc));
+    });
+
+    /**
+     * 해당 문서의 'awareness'가 변경될 때마다 호출되는 리스너를 연결
+     * (예: 커서 위치, 사용자 이름 변경 등)
+     */
+    doc.awareness.on("update", (awarenessUpdate: any) => {
+      // awarenessUpdate 객체에는 변경된 사용자 정보가 담겨 있습니다.
+      const states = Array.from(doc.awareness.getStates().values());
+      const userCount = states.length;
+      logger.info(
+        `[Awareness Update] Document '${doc.name}' awareness updated. (${userCount} users active)`
+      );
+    });
+  });
+
+  // 문서가 메모리에서 완전히 파기될 때 호출됩니다.
+  // 여기서 최종 DB 저장이나 리소스 정리 로직을 실행할 수 있습니다.
+  ysocketioProvider.on("document-destroy", async (doc) => {
+    logger.info(
+      `[Y.Doc] Document '${doc.name}' was destroyed and removed from memory.`
+    );
+  });
+
+  // ========================================
+  // ▲▲▲ YSocketIO 이벤트 리스너 끝 ▲▲▲
+  // ========================================
 
   // Socket.IO에 Redis 어댑터를 연결
   io.adapter(createAdapter(pubClient, subClient));

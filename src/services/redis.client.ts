@@ -7,7 +7,7 @@ dotenv.config();
 const redisOptions = {
   host: process.env.REDIS_HOST || "127.0.0.1",
   port: Number(process.env.REDIS_PORT) || 6379,
-  tls: {}, //로컬에서는 주석 운영에서는 활성화
+  // tls: {}, //로컬에서는 주석 운영에서는 활성화
   retryStrategy(times: number) {
     const delay = Math.min(times * 100, 3000); // 재시도 간격 조정
     return delay;
