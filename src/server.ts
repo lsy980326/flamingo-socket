@@ -38,7 +38,7 @@ async function startServer() {
   const io = new SocketIOServer(httpServer, {
     cors: { origin: "*", methods: ["GET", "POST"] },
     transports: ["websocket", "polling"],
-    // allowEIO3: true,
+    allowEIO3: true,
     pingTimeout: 60000, // 60초 동안 PONG을 받지 못하면 연결 해제 (기본값 5초)
     pingInterval: 25000, // 25초마다 PING 전송 (기본값 25초)
     maxHttpBufferSize: 1e8,
@@ -677,11 +677,13 @@ async function startServer() {
   //========================================
   // --- 6. Y-WebRTC 시그널링 전용 네임스페이스 ---
   const webrtcNamespace = io.of("/webrtc");
+  logger.info("✅ WebRTC namespace '/webrtc' initialized.");
 
   webrtcNamespace.use((socket, next) => {
     try {
       const token =
         socket.handshake.auth.token || (socket.handshake.query.token as string);
+      logger.info("토큰" + token);
       if (!token)
         return next(new Error("Authentication error: No token provided."));
 
@@ -697,7 +699,7 @@ async function startServer() {
     }
   });
 
-  webrtcNamespace.on("connection", (socket) => {
+  webrtcNamespace.on("connection", async (socket) => {
     const user = socket.data.user;
     logger.info(
       `[WebRTC-Signaling] User connected: ${user.email} (ID: ${socket.id})`
