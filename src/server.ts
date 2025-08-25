@@ -16,7 +16,8 @@ import { createAdapter } from "@socket.io/redis-adapter"; // 어댑터 import
 import { pubClient, subClient } from "./services/redis.client";
 import redisClient from "./services/redis.client"; // Redis 클라이언트 import
 import {
-  debouncedSaveToMongo,
+  debouncedSaveToMongo_layer,
+  debouncedSaveToMongo_canvas,
   flushAllPendingSaves,
 } from "./services/persistence.service"; // 영속성 서비스 import
 import { Binary } from "mongodb";
@@ -26,6 +27,7 @@ import { ProjectModel } from "./models/project.model";
 import { PageModel } from "./models/page.model";
 import { CanvasModel } from "./models/canvas.model";
 import { LayerModel } from "./models/layer.model";
+import { YjsDocModel } from "./models/yjsdoc.model";
 
 async function startServer() {
   //========================================
@@ -52,7 +54,7 @@ async function startServer() {
   // ▼▼▼ YSocketIO 이벤트 리스너 추가 ▼▼▼
   // ========================================
 
-  ysocketioProvider.on("document-loaded", (doc) => {
+  ysocketioProvider.on("document-loaded", (doc: any) => {
     // doc.name은 "/layer-레이어ID"와 같은 네임스페이스 이름입니다.
     logger.info(`[Y.Doc] Document '${doc.name}' was loaded into memory.`);
 
@@ -61,7 +63,7 @@ async function startServer() {
      * 이 리스너는 문서 내용이 변경될 때마다 호출
      */
     doc.on("update", (update: Uint8Array) => {
-      logger.info(`[Y.Doc Update] Document '${doc.name}' was updated.`);
+      // logger.info(`[Y.Doc Update] Document '${doc.name}' was updated.`);
       // 여기에 update (Uint8Array)를 사용한 DB 저장 로직 등을 연결할 수 있습니다.
       // 예: debouncedSaveToMongo(doc.name.replace('/layer-', ''), Y.encodeStateAsUpdate(doc));
     });
@@ -74,15 +76,15 @@ async function startServer() {
       // awarenessUpdate 객체에는 변경된 사용자 정보가 담겨 있습니다.
       const states = Array.from(doc.awareness.getStates().values());
       const userCount = states.length;
-      logger.info(
-        `[Awareness Update] Document '${doc.name}' awareness updated. (${userCount} users active)`
-      );
+      // logger.info(
+      //   `[Awareness Update] Document '${doc.name}' awareness updated. (${userCount} users active)`
+      // );
     });
   });
 
   // 문서가 메모리에서 완전히 파기될 때 호출됩니다.
   // 여기서 최종 DB 저장이나 리소스 정리 로직을 실행할 수 있습니다.
-  ysocketioProvider.on("document-destroy", async (doc) => {
+  ysocketioProvider.on("document-destroy", async (doc: any) => {
     logger.info(
       `[Y.Doc] Document '${doc.name}' was destroyed and removed from memory.`
     );
@@ -495,6 +497,159 @@ async function startServer() {
   });
 
   //========================================
+  // 5. 동적 캔버스 네임스페이스 (`/canvas-*`): Yjs 데이터 동기화
+  //========================================
+  const canvasNamespace = io.of(/^\/canvas-.+$/);
+
+  // 캔버스 네임스페이스용 인증/인가 미들웨어
+  canvasNamespace.use(async (socket, next) => {
+    try {
+      const token =
+        socket.handshake.auth.token || (socket.handshake.query.token as string);
+      if (!token)
+        return next(new Error("Authentication error: No token provided."));
+
+      const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
+        id: number;
+        email: string;
+      };
+      socket.data.user = { id: decoded.id, email: decoded.email };
+
+      const canvasId = socket.nsp.name.replace("/canvas-", "");
+
+      // 캔버스 ID로 프로젝트 정보를 조회
+      const canvas = await CanvasModel.findById(canvasId)
+        .select("projectId")
+        .lean();
+      if (!canvas) {
+        return next(new Error("Permission denied: Canvas not found."));
+      }
+
+      const project = await ProjectModel.findOne({ _id: canvas.projectId })
+        .select("collaborators")
+        .lean();
+      if (!project) {
+        return next(new Error("Permission denied: Project not found."));
+      }
+
+      const userRole = project.collaborators.find(
+        (c) => c.userId === Number(socket.data.user.id)
+      )?.role;
+      // ✨ 이제 뷰어(viewer)도 Yjs 문서를 받아볼 수 있어야 하므로, 참여자이기만 하면 통과
+      if (!userRole) {
+        return next(new Error("Permission denied: Not a collaborator."));
+      }
+
+      // 소켓 데이터에 역할도 저장해두면 편리함
+      socket.data.role = userRole;
+      next();
+    } catch (error: any) {
+      logger.error("[AuthZ] Error during canvas permission check:", error);
+      return next(new Error("Permission check failed."));
+    }
+  });
+  canvasNamespace.on("connection", (socket) => {
+    const canvasId = socket.nsp.name.replace("/canvas-", "");
+    const user = socket.data.user;
+
+    logger.info(
+      `[Canvas Namespace] User ${user.email} connected to canvas: ${canvasId}`
+    );
+
+    socket.on("request-canvas-data", async (callback) => {
+      // 1. 콜백 함수 유효성 검사
+      if (typeof callback !== "function") {
+        logger.error(
+          `[Yjs-Load] Callback is not a function for canvas ${canvasId}`
+        );
+        return;
+      }
+
+      logger.info(
+        `[Yjs-Load] Received 'request-canvas-data' from ${user.email} for canvas ${canvasId}`
+      );
+      const redisKey = `yjs-doc:${canvasId}`;
+
+      try {
+        // 2. Redis에서 먼저 데이터 조회 (Cache Hit 시도)
+        const dataFromRedis = await redisClient.getBuffer(redisKey);
+
+        if (dataFromRedis && dataFromRedis.length > 0) {
+          logger.info(
+            `[Yjs-Load] Cache Hit: Sending ${dataFromRedis.length} bytes from Redis for canvas ${canvasId}`
+          );
+          callback(dataFromRedis); // Redis 데이터를 클라이언트로 전송
+          return;
+        }
+
+        // 3. Redis에 데이터가 없는 경우 (Cache Miss)
+        logger.warn(
+          `[Yjs-Load] Cache miss for canvas ${canvasId}. Loading from MongoDB.`
+        );
+
+        // yjs_docs 컬렉션에서 해당 canvasId를 _id로 가진 문서를 찾음
+        const yjsDocFromMongo = await YjsDocModel.findById(canvasId).lean();
+
+        if (
+          yjsDocFromMongo &&
+          yjsDocFromMongo.data &&
+          yjsDocFromMongo.data.length > 0
+        ) {
+          // 4. MongoDB에 데이터가 있는 경우
+          const dataBuffer = yjsDocFromMongo.data; // .lean()과 Buffer 타입 스키마 덕분에 바로 Buffer로 사용 가능
+
+          logger.info(
+            `[Yjs-Load] Found ${dataBuffer.length} bytes in MongoDB for canvas ${canvasId}.`
+          );
+
+          // 4-1. 클라이언트에게 MongoDB 데이터를 전송
+          callback(dataBuffer);
+
+          // 4-2. Redis에 데이터를 다시 채워 넣음 (Cache Warming)
+          await redisClient.set(redisKey, dataBuffer, "EX", 86400); // 24시간 만료
+          logger.info(
+            `[Yjs-Load] Warmed up Redis cache for canvas ${canvasId}.`
+          );
+        } else {
+          // 5. Redis와 MongoDB 모두에 데이터가 없는 경우 (완전히 새로운 캔버스)
+          logger.info(`[Yjs-Load] No data found for new canvas ${canvasId}.`);
+          callback(null); // 클라이언트에게 null을 전달하여 빈 Y.Doc으로 시작하도록 함
+        }
+      } catch (error: any) {
+        logger.error(
+          `[Yjs-Load] CRITICAL ERROR in handler for canvas ${canvasId}:`,
+          error
+        );
+        // 에러 발생 시에도 클라이언트가 계속 진행할 수 있도록 null 전달
+        if (typeof callback === "function") {
+          callback(null);
+        }
+      }
+    });
+
+    socket.on("save-canvas-data", async (docUpdate: Buffer) => {
+      if (socket.data.role !== "owner" && socket.data.role !== "editor") return;
+
+      const redisKey = `yjs-doc:${canvasId}`;
+      try {
+        await redisClient.set(redisKey, docUpdate, "EX", 86400);
+        debouncedSaveToMongo_canvas(canvasId);
+      } catch (error) {
+        logger.error(
+          `[Yjs] Failed to save data for canvas ${canvasId}:`,
+          error
+        );
+      }
+    });
+
+    socket.on("disconnect", () => {
+      logger.info(
+        `[Canvas Namespace] User ${user.email} disconnected from canvas: ${canvasId}`
+      );
+    });
+  });
+
+  //========================================
   // 5. 동적 레이어 네임스페이스 (`/layer-*`): Yjs/WebRTC 및 데이터 영속성
   //========================================
   const layerNamespace = io.of(/^\/layer-.+$/);
@@ -700,7 +855,7 @@ async function startServer() {
 
         await redisClient.set(key, docUpdate, "EX", 86400); // 24시간 만료
         logger.info(`[Yjs] Saved data for layer ${layerId} to Redis.`);
-        debouncedSaveToMongo(layerId);
+        debouncedSaveToMongo_layer(layerId);
       } catch (error) {
         logger.error(`[Yjs] Failed to save data for layer ${layerId}:`, error);
         socket.emit("error", {
